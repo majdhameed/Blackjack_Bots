@@ -3,6 +3,7 @@ from dataclasses import replace
 import pytest
 
 from ml.betting_encoder import (
+    BETTING_FEATURE_COUNT,
     encode_betting_observation,
 )
 from tournament.observation import (
@@ -96,7 +97,7 @@ def make_observation():
     )
 
 
-def test_encoder_returns_57_float_features():
+def test_encoder_returns_expected_float_features():
     observation = make_observation()
 
     features = encode_betting_observation(
@@ -104,10 +105,10 @@ def test_encoder_returns_57_float_features():
     )
 
     assert isinstance(features, tuple)
-    assert len(features) == 57
+    assert len(features) == BETTING_FEATURE_COUNT
 
 
-def test_previous_round_features_are_explicit():
+def test_previous_bet_is_kept_but_own_outcome_history_is_neutralized():
     observation = replace(
         make_observation(),
         previous_bet=500,
@@ -120,14 +121,54 @@ def test_previous_round_features_are_explicit():
     features = encode_betting_observation(observation)
 
     assert features[52] == pytest.approx(500 / 14_000)
-    assert features[53] == pytest.approx(-500 / 14_000)
-    assert features[54] == -1.0
-    assert features[55] == 0.5
+    assert features[53:56] == (0.0, 0.0, 0.0)
     assert features[56] == 1.0
 
     assert all(
         isinstance(value, float)
         for value in features
+    )
+
+
+def test_own_win_and_loss_histories_encode_identically():
+    base = replace(
+        make_observation(),
+        previous_bet=500,
+        has_previous_round=True,
+    )
+    after_win = replace(
+        base,
+        previous_bankroll_change=500,
+        previous_result=1.0,
+        consecutive_losses=0,
+    )
+    after_losses = replace(
+        base,
+        previous_bankroll_change=-2_000,
+        previous_result=-1.0,
+        consecutive_losses=4,
+    )
+
+    assert encode_betting_observation(after_win) == (
+        encode_betting_observation(after_losses)
+    )
+
+
+def test_opponent_risk_features_are_explicit():
+    observation = replace(
+        make_observation(),
+        largest_opponent_previous_bet_fraction=0.50,
+        average_opponent_previous_bet_fraction=0.18,
+        opponents_over_ten_percent=4,
+        opponents_over_twenty_five_percent=2,
+        opponent_bet_volatility=0.16,
+        opponents_with_loss_streak=3,
+    )
+
+    features = encode_betting_observation(observation)
+
+    assert features[57:63] == pytest.approx(
+        (0.50, 0.18, 4 / 6, 2 / 6, 0.16, 3 / 6)
     )
 
 

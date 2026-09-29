@@ -3,15 +3,18 @@
 from blackjack.cards import Card
 from blackjack.player_hand import PlayerHand
 
+from tournament.power_chips import PowerChipInventory
 
 class Player:
-    def __init__(self, bankroll):
+    def __init__(self, bankroll, power_chip_count=0):
         if bankroll <= 0:
             raise ValueError("Bankroll must be greater than 0")
 
         self.bankroll = bankroll
         self.hands = []
         self.active_hand_index = 0
+        self.power_chips = PowerChipInventory(power_chip_count)
+
 
     def get_hand(self, hand_index):
         if not isinstance(hand_index, int):

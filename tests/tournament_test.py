@@ -1,4 +1,5 @@
 from blackjack.actions import Action
+import pytest
 from agents.all_in_agent import AllInAgent
 from blackjack.player import Player
 from tournament.tournament import Tournament
@@ -146,6 +147,26 @@ def test_betting_observation_includes_previous_round_state():
         observation.bankroll - 10_000
     )
     assert observation.previous_result in (-1.0, 0.0, 1.0)
+
+
+def test_betting_observation_summarizes_opponent_risk():
+    tournament = make_tournament(number_of_rounds=2)
+    tournament.start_next_round()
+    tournament.previous_bets = [100, 200, 3_000]
+    tournament.consecutive_losses = [0, 2, 0]
+
+    observation = tournament.build_betting_observation(
+        tournament.active_player_indices.index(0)
+    )
+
+    assert observation.largest_opponent_previous_bet_fraction == 0.30
+    assert observation.average_opponent_previous_bet_fraction == pytest.approx(
+        0.16
+    )
+    assert observation.opponents_over_ten_percent == 1
+    assert observation.opponents_over_twenty_five_percent == 1
+    assert observation.opponent_bet_volatility == pytest.approx(0.14)
+    assert observation.opponents_with_loss_streak == 1
 
 
 def test_begin_player_actions_deals_cards():

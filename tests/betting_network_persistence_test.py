@@ -1,7 +1,15 @@
 import numpy as np
 import pytest
 
-from ml.betting_network import BettingNetwork
+from ml.betting_encoder import BETTING_FEATURE_COUNT
+from ml.betting_network import (
+    BETTING_ACTION_NAMES,
+    FIVE_PERCENT_BETTING_ACTION_NAMES,
+    LEGACY_ACTION_RENAMES,
+    LEGACY_BETTING_ACTION_NAMES,
+    MACRO_BETTING_ACTION_NAMES,
+    BettingNetwork,
+)
 
 
 PARAMETER_NAMES = (
@@ -63,7 +71,7 @@ def test_loaded_network_produces_same_output(
     features = np.linspace(
         0.0,
         1.0,
-        57,
+        BETTING_FEATURE_COUNT,
     )
 
     expected_output = original.forward(features)
@@ -112,7 +120,7 @@ def test_load_rejects_missing_parameters(
 
     np.savez(
         file_path,
-        weights1=np.zeros((32, 57)),
+        weights1=np.zeros((32, BETTING_FEATURE_COUNT)),
     )
 
     with pytest.raises(ValueError):
@@ -122,7 +130,7 @@ def test_load_rejects_missing_parameters(
 @pytest.mark.parametrize(
     "parameter_name,wrong_shape",
     [
-        ("weights1", (31, 57)),
+        ("weights1", (31, BETTING_FEATURE_COUNT)),
         ("biases1", (31,)),
         ("weights2", (15, 32)),
         ("biases2", (15,)),
@@ -190,7 +198,7 @@ def test_load_upgrades_legacy_46_feature_network(
 
     loaded = BettingNetwork.load(file_path)
 
-    assert loaded.weights1.shape == (32, 57)
+    assert loaded.weights1.shape == (32, BETTING_FEATURE_COUNT)
 
     np.testing.assert_array_equal(
         loaded.weights1[:, :46],
@@ -199,7 +207,130 @@ def test_load_upgrades_legacy_46_feature_network(
 
     np.testing.assert_array_equal(
         loaded.weights1[:, 46:],
-        np.zeros((32, 11)),
+        np.zeros((32, BETTING_FEATURE_COUNT - 46)),
     )
 
-    assert loaded.preferred_action((0.0,) * 57) == 0
+    assert loaded.preferred_action((0.0,) * BETTING_FEATURE_COUNT) == 0
+
+
+def test_load_maps_legacy_action_head_to_percentage_actions(
+    tmp_path,
+):
+    network = BettingNetwork(seed=123)
+    parameters = network.get_parameters()
+    legacy_weights = np.arange(
+        len(LEGACY_BETTING_ACTION_NAMES) * 16,
+        dtype=float,
+    ).reshape(len(LEGACY_BETTING_ACTION_NAMES), 16)
+    legacy_biases = np.arange(
+        len(LEGACY_BETTING_ACTION_NAMES),
+        dtype=float,
+    )
+    parameters["action_weights"] = legacy_weights
+    parameters["action_biases"] = legacy_biases
+
+    file_path = tmp_path / "legacy_actions.npz"
+    np.savez(file_path, **parameters)
+
+    loaded = BettingNetwork.load(file_path)
+
+    expected_source_by_action = {}
+    for legacy_index, legacy_name in enumerate(LEGACY_BETTING_ACTION_NAMES):
+        current_name = LEGACY_ACTION_RENAMES[legacy_name]
+        expected_source_by_action[current_name] = legacy_index
+
+    for current_name, legacy_index in expected_source_by_action.items():
+        current_index = BETTING_ACTION_NAMES.index(current_name)
+        np.testing.assert_array_equal(
+            loaded.action_weights[current_index],
+            legacy_weights[legacy_index],
+        )
+        assert loaded.action_biases[current_index] == pytest.approx(
+            legacy_biases[legacy_index]
+        )
+
+    for new_action_name in (
+        set(BETTING_ACTION_NAMES) - set(expected_source_by_action)
+    ):
+        new_action_index = BETTING_ACTION_NAMES.index(
+            new_action_name
+        )
+        assert loaded.action_biases[new_action_index] < -100_000
+
+
+def test_load_maps_macro_action_checkpoint_to_percentage_actions(
+    tmp_path,
+):
+    network = BettingNetwork(seed=123)
+    parameters = network.get_parameters()
+    old_weights = np.arange(
+        len(MACRO_BETTING_ACTION_NAMES) * 16,
+        dtype=float,
+    ).reshape(len(MACRO_BETTING_ACTION_NAMES), 16)
+    old_biases = np.arange(
+        len(MACRO_BETTING_ACTION_NAMES),
+        dtype=float,
+    )
+    parameters["action_weights"] = old_weights
+    parameters["action_biases"] = old_biases
+    file_path = tmp_path / "macro_actions.npz"
+    np.savez(file_path, **parameters)
+
+    loaded = BettingNetwork.load(file_path)
+
+    expected_source_by_action = {}
+    for old_index, old_name in enumerate(MACRO_BETTING_ACTION_NAMES):
+        expected_source_by_action[
+            LEGACY_ACTION_RENAMES[old_name]
+        ] = old_index
+
+    for action_name, old_index in expected_source_by_action.items():
+        action_index = BETTING_ACTION_NAMES.index(action_name)
+        np.testing.assert_array_equal(
+            loaded.action_weights[action_index],
+            old_weights[old_index],
+        )
+        assert loaded.action_biases[action_index] == pytest.approx(
+            old_biases[old_index]
+        )
+
+
+def test_load_maps_five_percent_checkpoint_to_smaller_action_set(
+    tmp_path,
+):
+    network = BettingNetwork(seed=123)
+    parameters = network.get_parameters()
+    old_weights = np.arange(
+        len(FIVE_PERCENT_BETTING_ACTION_NAMES) * 16,
+        dtype=float,
+    ).reshape(len(FIVE_PERCENT_BETTING_ACTION_NAMES), 16)
+    old_biases = np.arange(
+        len(FIVE_PERCENT_BETTING_ACTION_NAMES),
+        dtype=float,
+    )
+    parameters["weights1"] = parameters["weights1"][:, :57]
+    parameters["action_weights"] = old_weights
+    parameters["action_biases"] = old_biases
+    file_path = tmp_path / "five_percent_actions.npz"
+    np.savez(file_path, **parameters)
+
+    loaded = BettingNetwork.load(file_path)
+
+    assert loaded.weights1.shape == (32, BETTING_FEATURE_COUNT)
+    expected_source_by_action = {}
+    for old_index, old_name in enumerate(
+        FIVE_PERCENT_BETTING_ACTION_NAMES
+    ):
+        expected_source_by_action[
+            LEGACY_ACTION_RENAMES[old_name]
+        ] = old_index
+
+    for action_name, old_index in expected_source_by_action.items():
+        action_index = BETTING_ACTION_NAMES.index(action_name)
+        np.testing.assert_array_equal(
+            loaded.action_weights[action_index],
+            old_weights[old_index],
+        )
+        assert loaded.action_biases[action_index] == pytest.approx(
+            old_biases[old_index]
+        )

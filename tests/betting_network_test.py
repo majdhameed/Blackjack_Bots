@@ -5,19 +5,20 @@ from ml.betting_network import (
     BETTING_ACTION_COUNT,
     BettingNetwork,
 )
+from ml.betting_encoder import BETTING_FEATURE_COUNT
 
 
 def make_features():
     return tuple(
-        index / 57
-        for index in range(57)
+        index / BETTING_FEATURE_COUNT
+        for index in range(BETTING_FEATURE_COUNT)
     )
 
 
 def test_network_has_correct_parameter_shapes():
     network = BettingNetwork(seed=1)
 
-    assert network.weights1.shape == (32, 57)
+    assert network.weights1.shape == (32, BETTING_FEATURE_COUNT)
     assert network.biases1.shape == (32,)
 
     assert network.weights2.shape == (16, 32)
@@ -38,7 +39,7 @@ def test_strategy_seed_selects_requested_action():
     network = BettingNetwork(seed=1)
     network.seed_preferred_action(3)
 
-    assert network.preferred_action((0.0,) * 57) == 3
+    assert network.preferred_action((0.0,) * BETTING_FEATURE_COUNT) == 3
 
 
 def test_forward_returns_float():
@@ -64,7 +65,7 @@ def test_output_is_between_zero_and_one():
 def test_zero_features_produce_half_with_zero_biases():
     network = BettingNetwork(seed=1)
 
-    features = (0.0,) * 57
+    features = (0.0,) * BETTING_FEATURE_COUNT
 
     result = network.forward(features)
 
@@ -127,7 +128,7 @@ def test_positive_final_bias_produces_output_above_half():
     network.biases3[0] = 2.0
 
     result = network.forward(
-        (0.0,) * 57
+        (0.0,) * BETTING_FEATURE_COUNT
     )
 
     assert result > 0.5
@@ -139,7 +140,7 @@ def test_negative_final_bias_produces_output_below_half():
     network.biases3[0] = -2.0
 
     result = network.forward(
-        (0.0,) * 57
+        (0.0,) * BETTING_FEATURE_COUNT
     )
 
     assert result < 0.5
@@ -151,7 +152,7 @@ def test_large_positive_value_does_not_overflow():
     network.biases3[0] = 1_000_000
 
     result = network.forward(
-        (0.0,) * 57
+        (0.0,) * BETTING_FEATURE_COUNT
     )
 
     assert 0.0 <= result <= 1.0
@@ -164,7 +165,7 @@ def test_large_negative_value_does_not_overflow():
     network.biases3[0] = -1_000_000
 
     result = network.forward(
-        (0.0,) * 57
+        (0.0,) * BETTING_FEATURE_COUNT
     )
 
     assert 0.0 <= result <= 1.0
@@ -193,7 +194,7 @@ def test_nan_feature_raises_error():
     network = BettingNetwork(seed=1)
 
     features = list(
-        (0.0,) * 57
+        (0.0,) * BETTING_FEATURE_COUNT
     )
     features[10] = float("nan")
 
@@ -205,7 +206,7 @@ def test_positive_infinity_raises_error():
     network = BettingNetwork(seed=1)
 
     features = list(
-        (0.0,) * 57
+        (0.0,) * BETTING_FEATURE_COUNT
     )
     features[10] = float("inf")
 
@@ -217,7 +218,7 @@ def test_negative_infinity_raises_error():
     network = BettingNetwork(seed=1)
 
     features = list(
-        (0.0,) * 57
+        (0.0,) * BETTING_FEATURE_COUNT
     )
     features[10] = float("-inf")
 

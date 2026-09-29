@@ -1,3 +1,6 @@
+import argparse
+from functools import wraps
+import inspect
 import random
 from pathlib import Path
 
@@ -43,6 +46,25 @@ RISK_TAKER_STRATEGY_NAMES = (
     "lead_protector",
     "aggressive_chaser",
 )
+
+
+def isolated_evaluation_randomness(function):
+    """Make every evaluation seed cover shoes and table randomness too."""
+    signature = inspect.signature(function)
+
+    @wraps(function)
+    def wrapper(*args, **kwargs):
+        bound_arguments = signature.bind_partial(*args, **kwargs)
+        bound_arguments.apply_defaults()
+        seed = bound_arguments.arguments["seed"]
+        previous_random_state = random.getstate()
+        random.seed(seed)
+        try:
+            return function(*args, **kwargs)
+        finally:
+            random.setstate(previous_random_state)
+
+    return wrapper
 
 
 def create_competitors(saved_network_path):
@@ -423,6 +445,7 @@ def run_one_tournament(
     return rankings
 
 
+@isolated_evaluation_randomness
 def evaluate_network(
     saved_network_path,
     number_of_tournaments,
@@ -647,10 +670,29 @@ def ask_positive_integer(prompt):
             )
 
 
-def main():
-    saved_network_path = Path(
-        "models/best_betting_network.npz"
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Evaluate a saved betting-network checkpoint."
     )
+    parser.add_argument(
+        "model_path",
+        nargs="?",
+        default="models/best_betting_network.npz",
+    )
+    parser.add_argument(
+        "--tournaments",
+        type=int,
+        help="Skip the interactive tournament-count prompt.",
+    )
+    parser.add_argument(
+        "--league-directory",
+        help=(
+            "League checkpoint directory; defaults to the league folder "
+            "beside the selected model."
+        ),
+    )
+    args = parser.parse_args(argv)
+    saved_network_path = Path(args.model_path)
 
     if not saved_network_path.exists():
         raise FileNotFoundError(
@@ -658,9 +700,13 @@ def main():
             f"{saved_network_path}"
         )
 
-    number_of_tournaments = ask_positive_integer(
-        "Number of evaluation tournaments: "
-    )
+    number_of_tournaments = args.tournaments
+    if number_of_tournaments is None:
+        number_of_tournaments = ask_positive_integer(
+            "Number of evaluation tournaments: "
+        )
+    elif number_of_tournaments <= 0:
+        parser.error("--tournaments must be positive")
 
     results = evaluate_network(
         saved_network_path=saved_network_path,
@@ -695,7 +741,11 @@ def main():
 
     print_results(risk_results)
 
-    league_directory = Path("models/league")
+    league_directory = (
+        Path(args.league_directory)
+        if args.league_directory is not None
+        else saved_network_path.parent / "league"
+    )
     if any(league_directory.glob("champion_*.npz")):
         league_results = evaluate_network(
             saved_network_path=saved_network_path,
@@ -728,6 +778,7 @@ def main():
 
     print_six_minimum_results(results)
 
+@isolated_evaluation_randomness
 def evaluate_against_six_minimum(
     saved_network_path,
     number_of_tournaments,

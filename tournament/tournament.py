@@ -434,6 +434,32 @@ class Tournament:
             self.get_count_information()
         )
 
+        opponent_indices = [
+            player_index
+            for player_index in self.active_player_indices
+            if player_index != permanent_player_index
+        ]
+        opponent_previous_bet_fractions = [
+            self.previous_bets[player_index]
+            / max(
+                self.players[player_index].bankroll,
+                self.minimum_bet,
+            )
+            for player_index in opponent_indices
+        ]
+        if opponent_previous_bet_fractions:
+            average_opponent_fraction = sum(
+                opponent_previous_bet_fractions
+            ) / len(opponent_previous_bet_fractions)
+            opponent_variance = sum(
+                (fraction - average_opponent_fraction) ** 2
+                for fraction in opponent_previous_bet_fractions
+            ) / len(opponent_previous_bet_fractions)
+            opponent_volatility = math.sqrt(opponent_variance)
+        else:
+            average_opponent_fraction = 0.0
+            opponent_volatility = 0.0
+
         return BettingObservation(
             round_number=self.current_round_number,
             total_rounds=self.number_of_rounds,
@@ -465,6 +491,26 @@ class Tournament:
             has_previous_round=self.has_previous_round[
                 permanent_player_index
             ],
+            largest_opponent_previous_bet_fraction=max(
+                opponent_previous_bet_fractions,
+                default=0.0,
+            ),
+            average_opponent_previous_bet_fraction=(
+                average_opponent_fraction
+            ),
+            opponents_over_ten_percent=sum(
+                fraction >= 0.10
+                for fraction in opponent_previous_bet_fractions
+            ),
+            opponents_over_twenty_five_percent=sum(
+                fraction >= 0.25
+                for fraction in opponent_previous_bet_fractions
+            ),
+            opponent_bet_volatility=opponent_volatility,
+            opponents_with_loss_streak=sum(
+                self.consecutive_losses[player_index] > 0
+                for player_index in opponent_indices
+            ),
             **count_information
         )
 

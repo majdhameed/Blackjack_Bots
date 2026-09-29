@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 from ml.population import Population
+from ml.betting_encoder import BETTING_FEATURE_COUNT
 
 
 PARAMETER_NAMES = (
@@ -40,6 +41,10 @@ def test_population_creates_requested_networks():
     assert population.generation_number == 0
     assert np.all(
         np.asarray(population.fitness_scores) == 0
+    )
+    assert all(
+        network.preferred_action((0.0,) * BETTING_FEATURE_COUNT) != 0
+        for network in population.networks
     )
 
 
@@ -120,6 +125,33 @@ def test_next_generation_preserves_elites():
         population.networks[1],
         second_best,
     )
+
+
+def test_next_generation_can_use_explicit_elites():
+    population = Population(
+        population_size=7,
+        elite_count=2,
+        mutation_rate=1.0,
+        mutation_strength=1.0,
+        seed=123,
+    )
+    population.fitness_scores[0] = 100
+    selected_first = population.networks[5].clone()
+    selected_second = population.networks[2].clone()
+
+    population.create_next_generation(elite_indices=[5, 2])
+
+    assert networks_are_equal(population.networks[0], selected_first)
+    assert networks_are_equal(population.networks[1], selected_second)
+
+
+def test_explicit_elites_must_be_unique_and_complete():
+    population = Population(7, 2, 0.1, 0.1, seed=123)
+
+    with pytest.raises(ValueError):
+        population.create_next_generation(elite_indices=[1])
+    with pytest.raises(ValueError):
+        population.create_next_generation(elite_indices=[1, 1])
 
 
 def test_children_are_mutated():

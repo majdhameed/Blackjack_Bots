@@ -1,6 +1,8 @@
 import pytest
 
 from agents.neural_betting_agent import NeuralBettingAgent
+from ml.betting_encoder import BETTING_FEATURE_COUNT
+from ml.betting_network import BETTING_ACTION_NAMES, BETTING_PERCENTAGES
 from tournament.observation import BettingObservation
 
 
@@ -100,7 +102,7 @@ def test_network_output_controls_bet_percentage():
 
     assert bet == 250
     assert network.received_features is not None
-    assert len(network.received_features) == 57
+    assert len(network.received_features) == BETTING_FEATURE_COUNT
 
 
 def test_bet_is_floored_to_table_chip_increment():
@@ -171,45 +173,23 @@ def test_constructor_rejects_object_without_forward():
 
 
 @pytest.mark.parametrize(
-    "action_index,expected_bet",
-    [
-        (1, 10),
-        (2, 50),
-        (4, 10),
-        (5, 10),
-        (7, 500),
-        (8, 1_000),
-    ],
+    "percentage",
+    BETTING_PERCENTAGES,
 )
-def test_network_can_select_meaningful_betting_actions(
-    action_index,
-    expected_bet,
-):
+def test_network_can_select_percentage_bet_buckets(percentage):
+    action_name = f"bet_{percentage:02d}_percent"
     agent = NeuralBettingAgent(
-        FakeActionNetwork(action_index)
+        FakeActionNetwork(BETTING_ACTION_NAMES.index(action_name))
     )
 
-    assert agent.choose_bet(make_observation()) == expected_bet
+    assert agent.choose_bet(make_observation()) == percentage * 10
 
 
-def test_take_second_action_bets_the_bankroll_gap():
-    observation = make_observation(bankroll=800)
-    agent = NeuralBettingAgent(FakeActionNetwork(4))
-
-    assert agent.choose_bet(observation) == 210
-
-
-def test_controlled_recovery_action_doubles_previous_loss():
-    base = make_observation(bankroll=1_000)
-    observation = BettingObservation(
-        **{
-            **base.__dict__,
-            "previous_bet": 50,
-            "previous_result": -1.0,
-            "consecutive_losses": 1,
-            "has_previous_round": True,
-        }
+def test_network_can_select_true_table_minimum():
+    agent = NeuralBettingAgent(
+        FakeActionNetwork(
+            BETTING_ACTION_NAMES.index("minimum")
+        )
     )
-    agent = NeuralBettingAgent(FakeActionNetwork(3))
 
-    assert agent.choose_bet(observation) == 100
+    assert agent.choose_bet(make_observation()) == 10

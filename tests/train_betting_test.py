@@ -2,8 +2,10 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+import numpy as np
 
 import train_betting
+from ml.betting_network import BettingNetwork
 from ml.population import Population
 from ml.trainer import Trainer
 
@@ -82,6 +84,66 @@ def test_create_population():
     assert population.mutation_rate == 0.05
     assert population.mutation_strength == 0.1
     assert len(population.networks) == 14
+
+
+def test_warm_start_population_continues_generation_and_keeps_fresh_half(
+    tmp_path,
+):
+    run_directory = tmp_path / "previous-run"
+    incumbent = BettingNetwork(seed=456)
+    incumbent.save(run_directory / "best_betting_network.npz")
+    train_betting.save_training_history(
+        run_directory / "metrics.csv",
+        [{"generation": 249}],
+    )
+    population = Population(14, 2, 0.05, 0.1, seed=123)
+    untouched_fresh_network = population.networks[13].clone()
+
+    state = train_betting.warm_start_population(
+        population,
+        run_directory,
+    )
+
+    assert state["next_generation"] == 250
+    assert state["warm_network_count"] == 7
+    assert state["fresh_network_count"] == 7
+    assert population.generation_number == 250
+    np.testing.assert_array_equal(
+        population.networks[0].weights1,
+        incumbent.weights1,
+    )
+    np.testing.assert_array_equal(
+        population.networks[13].weights1,
+        untouched_fresh_network.weights1,
+    )
+
+
+def test_carry_forward_league_copies_loadable_champions(tmp_path):
+    previous_run = tmp_path / "previous-run"
+    previous_league = previous_run / "league"
+    network = BettingNetwork(seed=789)
+    network.save(previous_league / "champion_0249_0.1234.npz")
+    new_league = tmp_path / "new-run" / "league"
+
+    copied_count = train_betting.carry_forward_league(
+        previous_run,
+        new_league,
+    )
+
+    assert copied_count == 1
+    copied = BettingNetwork.load(
+        new_league / "champion_0249_0.1234.npz"
+    )
+    np.testing.assert_array_equal(copied.weights1, network.weights1)
+
+
+def test_parse_arguments_accepts_resume_directory_and_generation_count():
+    arguments = train_betting.parse_arguments(
+        ["--resume-from", "runs/old", "--generations", "100"]
+    )
+
+    assert arguments.resume_from == Path("runs/old")
+    assert arguments.generations == 100
 
 
 # --------------------------------------------------
@@ -308,12 +370,16 @@ def test_run_training_saves_overall_best_network(
     ]
 
     assert winning_network.saved_paths == [
-        output_path
+        output_path,
+        tmp_path / "checkpoints" / "generation_0001_+15.0000.npz",
     ]
 
     assert (
         results[0]["best_network"].saved_paths
-        == [output_path]
+        == [
+            output_path,
+            tmp_path / "checkpoints" / "generation_0000_+10.0000.npz",
+        ]
     )
 
     assert (
@@ -359,7 +425,7 @@ def test_run_training_returns_history(
     ] == 2
 
 
-def test_saved_generation_requires_late_stage_success(
+def test_saved_generation_prefers_raw_advancement_over_advantage(
     tmp_path,
 ):
     common = {
@@ -378,14 +444,16 @@ def test_saved_generation_requires_late_stage_success(
             "generation": 0,
             "best_network": FakeNetwork("no-late"),
             "benchmark_late_fitness": 0.0,
-            "benchmark_selection_fitness": 0.9,
+            "benchmark_selection_fitness": 0.0,
+            "benchmark_raw_selection_fitness": 0.9,
         },
         {
             **common,
             "generation": 1,
             "best_network": FakeNetwork("late-success"),
             "benchmark_late_fitness": 0.1,
-            "benchmark_selection_fitness": 0.5,
+            "benchmark_selection_fitness": 0.1,
+            "benchmark_raw_selection_fitness": 0.5,
         },
     ]
     trainer = FakeTrainer(results)
@@ -399,8 +467,8 @@ def test_saved_generation_requires_late_stage_success(
         print_fn=lambda message: None,
     )
 
-    assert summary["best_generation"] == 1
-    assert summary["best_benchmark_late_fitness"] == 0.1
+    assert summary["best_generation"] == 0
+    assert summary["best_benchmark_late_fitness"] == 0.0
 
 
 def test_independent_verification_rejects_lucky_checkpoint(
@@ -468,6 +536,208 @@ def test_independent_verification_rejects_lucky_checkpoint(
 
     assert summary["best_generation"] == 0
     assert summary["best_benchmark_selection_fitness"] == 0.40
+
+
+def test_resumed_incumbent_is_verified_before_replacement(tmp_path):
+    incumbent = FakeNetwork("incumbent")
+    challenger = FakeNetwork("challenger")
+    result = {
+        "generation": 250,
+        "best_network_index": 0,
+        "best_fitness": 10.0,
+        "average_fitness": 5.0,
+        "best_network": challenger,
+        "benchmark_fitness": 0.4,
+        "benchmark_normal_fitness": 0.4,
+        "benchmark_mid_fitness": 0.4,
+        "benchmark_late_fitness": 0.4,
+        "benchmark_holdout_fitness": 0.4,
+        "benchmark_minimum_holdout_fitness": 0.4,
+        "benchmark_selection_fitness": 0.1,
+        "benchmark_raw_selection_fitness": 0.4,
+    }
+
+    class ResumeTrainer(FakeTrainer):
+        def compare_checkpoint_networks(
+            self, candidate, current_incumbent, tournament_count
+        ):
+            assert candidate is challenger
+            assert current_incumbent is incumbent
+            return {
+                "benchmark_selection_fitness": 0.30,
+                "benchmark_raw_selection_fitness": 0.30,
+                "checkpoint_accepted": False,
+                "checkpoint_batches_won": 1,
+                "checkpoint_batch_count": 3,
+                "checkpoint_improvement": -0.05,
+            }, {
+                "benchmark_selection_fitness": 0.35,
+                "benchmark_raw_selection_fitness": 0.35,
+            }
+
+    output_path = tmp_path / "new-run" / "winner.npz"
+    summary = train_betting.run_training(
+        trainer=ResumeTrainer([result]),
+        generations=1,
+        tournaments_per_network=1,
+        output_path=output_path,
+        print_fn=lambda message: None,
+        benchmark_tournaments_per_generation=10,
+        checkpoint_verification_tournaments=30,
+        initial_best_network=incumbent,
+        initial_best_generation=249,
+    )
+
+    assert summary["best_network"] is incumbent
+    assert summary["best_generation"] == 249
+    assert incumbent.saved_paths == [output_path]
+    assert challenger.saved_paths == []
+
+
+def test_rotating_verification_archives_risk_style_champion(tmp_path):
+    result = {
+        "generation": 0,
+        "best_network_index": 0,
+        "best_fitness": 10.0,
+        "average_fitness": 5.0,
+        "best_network": FakeNetwork("aggressive"),
+        "benchmark_fitness": 0.4,
+        "benchmark_normal_fitness": 0.4,
+        "benchmark_mid_fitness": 0.4,
+        "benchmark_late_fitness": 0.4,
+        "benchmark_holdout_fitness": 0.4,
+        "benchmark_minimum_holdout_fitness": 0.4,
+        "benchmark_selection_fitness": 0.1,
+        "benchmark_raw_selection_fitness": 0.4,
+    }
+
+    class PortfolioTrainer(FakeTrainer):
+        def compare_checkpoint_networks(
+            self, challenger, incumbent, tournament_count
+        ):
+            return {
+                "benchmark_selection_fitness": 0.1,
+                "benchmark_raw_selection_fitness": 0.4,
+                "benchmark_top_two_rate": 0.4,
+                "benchmark_first_place_rate": 0.2,
+                "benchmark_average_position": 3.8,
+                "benchmark_bankruptcy_rate": 0.15,
+                "checkpoint_accepted": True,
+                "checkpoint_batches_won": 3,
+                "checkpoint_batch_count": 3,
+                "checkpoint_improvement": None,
+            }, None
+
+    trainer = PortfolioTrainer([result])
+    summary = train_betting.run_training(
+        trainer=trainer,
+        generations=1,
+        tournaments_per_network=1,
+        output_path=tmp_path / "winner.npz",
+        print_fn=lambda message: None,
+        benchmark_tournaments_per_generation=10,
+        checkpoint_verification_tournaments=30,
+    )
+
+    expected_portfolio_path = (
+        tmp_path
+        / "champions"
+        / "aggressive"
+        / "generation_0000_0.4000.npz"
+    )
+    assert summary["portfolio_best_scores"] == {"aggressive": 0.4}
+    assert summary["portfolio_paths"] == [expected_portfolio_path]
+    assert expected_portfolio_path in result["best_network"].saved_paths
+
+
+def test_final_audit_reports_without_changing_winner(tmp_path):
+    results = make_generation_results()
+
+    class AuditTrainer(FakeTrainer):
+        def evaluate_robust_checkpoint(self, network, tournament_count):
+            assert network.identifier == "one"
+            assert tournament_count == 1_000
+            return {
+                "benchmark_raw_selection_fitness": 0.37,
+                "benchmark_first_place_rate": 0.18,
+                "benchmark_bankruptcy_rate": 0.06,
+            }
+
+    summary = train_betting.run_training(
+        trainer=AuditTrainer(results),
+        generations=3,
+        tournaments_per_network=1,
+        output_path=tmp_path / "winner.npz",
+        print_fn=lambda message: None,
+        final_audit_tournaments=1_000,
+    )
+
+    assert summary["best_generation"] == 1
+    assert summary["final_audit_metrics"][
+        "benchmark_raw_selection_fitness"
+    ] == pytest.approx(0.37)
+
+
+def test_run_training_stops_after_verified_patience(tmp_path):
+    def generation_result(generation):
+        return {
+            "generation": generation,
+            "best_network_index": generation,
+            "best_fitness": 10.0,
+            "average_fitness": 5.0,
+            "best_network": FakeNetwork(str(generation)),
+            "benchmark_fitness": 0.5,
+            "benchmark_normal_fitness": 0.5,
+            "benchmark_mid_fitness": 0.5,
+            "benchmark_late_fitness": 0.5,
+            "benchmark_holdout_fitness": 0.5,
+            "benchmark_minimum_holdout_fitness": 0.5,
+            "benchmark_selection_fitness": 0.5,
+        }
+
+    class StableTrainer(FakeTrainer):
+        def compare_checkpoint_networks(
+            self,
+            challenger,
+            incumbent,
+            tournament_count,
+        ):
+            score = 0.5 if incumbent is None else 0.49
+            challenger_metrics = {
+                "benchmark_selection_fitness": score,
+                "benchmark_raw_selection_fitness": score,
+                "checkpoint_accepted": incumbent is None,
+                "checkpoint_batches_won": 0 if incumbent else 3,
+                "checkpoint_batch_count": 3,
+                "checkpoint_improvement": None,
+            }
+            incumbent_metrics = (
+                None
+                if incumbent is None
+                else {
+                    "benchmark_selection_fitness": 0.5,
+                    "benchmark_raw_selection_fitness": 0.5,
+                }
+            )
+            return challenger_metrics, incumbent_metrics
+
+    trainer = StableTrainer(
+        [generation_result(generation) for generation in range(10)]
+    )
+    summary = train_betting.run_training(
+        trainer=trainer,
+        generations=10,
+        tournaments_per_network=1,
+        output_path=tmp_path / "winner.npz",
+        print_fn=lambda message: None,
+        benchmark_tournaments_per_generation=10,
+        checkpoint_verification_tournaments=30,
+        early_stopping_patience=2,
+    )
+
+    assert summary["early_stopped"] is True
+    assert summary["completed_generations"] == 3
+    assert summary["best_generation"] == 0
 
 
 def test_run_training_persists_metrics_after_every_generation(

@@ -1,3 +1,5 @@
+import random
+
 import pytest
 
 from evaluate_betting_network import (
@@ -5,6 +7,7 @@ from evaluate_betting_network import (
     STRATEGY_NAMES,
     create_statistics,
     create_league_competitors,
+    evaluate_network,
     record_top_two_credits,
 )
 from ml.betting_network import BettingNetwork
@@ -90,3 +93,28 @@ def test_league_evaluation_loads_archived_champions(tmp_path):
     assert len(competitors) == 7
     assert "league_champion_1" in names
     assert "league_champion_2" in names
+
+
+def test_evaluation_seed_covers_cards_and_restores_global_randomness(
+    tmp_path,
+):
+    model_path = tmp_path / "network.npz"
+    BettingNetwork(seed=7).save(model_path)
+
+    random.seed(91)
+    original_state = random.getstate()
+    first = evaluate_network(
+        model_path,
+        number_of_tournaments=3,
+        seed=2468,
+    )
+    assert random.getstate() == original_state
+
+    random.seed(1357)
+    second = evaluate_network(
+        model_path,
+        number_of_tournaments=3,
+        seed=2468,
+    )
+
+    assert first == second

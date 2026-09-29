@@ -2,7 +2,7 @@
 from tournament.observation import BettingObservation
 
 
-BETTING_FEATURE_COUNT = 57
+BETTING_FEATURE_COUNT = 63
 
 def encode_betting_observation(observation: BettingObservation) -> tuple[float, ...]:
     if not isinstance(observation, BettingObservation):
@@ -122,20 +122,25 @@ def encode_betting_observation(observation: BettingObservation) -> tuple[float, 
     features.extend(
         (
             observation.previous_bet / money_scale,
-            max(
-                -1.0,
-                min(
-                    1.0,
-                    observation.previous_bankroll_change
-                    / money_scale,
-                ),
-            ),
-            max(
-                -1.0,
-                min(1.0, observation.previous_result),
-            ),
-            min(observation.consecutive_losses, 4) / 4,
+            # A player's prior outcome does not alter the odds of the next
+            # blackjack hand.  Keep these legacy positions neutral so saved
+            # network shapes remain compatible without rewarding loss chasing.
+            0.0,
+            0.0,
+            0.0,
             1.0 if observation.has_previous_round else 0.0,
+        )
+    )
+
+    opponent_scale = max(player_count - 1, 1)
+    features.extend(
+        (
+            min(1.0, observation.largest_opponent_previous_bet_fraction),
+            min(1.0, observation.average_opponent_previous_bet_fraction),
+            observation.opponents_over_ten_percent / opponent_scale,
+            observation.opponents_over_twenty_five_percent / opponent_scale,
+            min(1.0, observation.opponent_bet_volatility),
+            observation.opponents_with_loss_streak / opponent_scale,
         )
     )
 

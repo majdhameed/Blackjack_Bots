@@ -6,7 +6,7 @@ import numpy as np
 from ml.betting_encoder import BETTING_FEATURE_COUNT
 
 
-BETTING_ACTION_NAMES = (
+LEGACY_BETTING_ACTION_NAMES = (
     "legacy_fraction",
     "minimum",
     "five_percent",
@@ -18,7 +18,93 @@ BETTING_ACTION_NAMES = (
     "all_in",
     "protect_lead",
 )
+
+MACRO_BETTING_ACTION_NAMES = (
+    "legacy_fraction",
+    "minimum",
+    "five_percent",
+    "controlled_recovery",
+    "quarter_gap_to_second",
+    "half_gap_to_second",
+    "full_gap_to_second",
+    "quarter_gap_to_first",
+    "half_gap_to_first",
+    "full_gap_to_first",
+    "cover_visible_bets",
+    "half_bankroll",
+    "all_in",
+    "protect_lead",
+)
+
+FIVE_PERCENT_BETTING_ACTION_NAMES = (
+    "legacy_fraction",
+    "minimum",
+    *tuple(
+        f"bet_{percentage:02d}_percent"
+        for percentage in range(5, 101, 5)
+    ),
+)
+
+BETTING_PERCENTAGES = (
+    2,
+    3,
+    5,
+    10,
+    15,
+    20,
+    30,
+    40,
+    50,
+    75,
+    100,
+)
+
+PERCENTAGE_BET_ACTION_NAMES = tuple(
+    f"bet_{percentage:02d}_percent"
+    for percentage in BETTING_PERCENTAGES
+)
+
+BETTING_ACTION_NAMES = (
+    "legacy_fraction",
+    "minimum",
+    *PERCENTAGE_BET_ACTION_NAMES,
+)
 BETTING_ACTION_COUNT = len(BETTING_ACTION_NAMES)
+TRAINABLE_BETTING_ACTION_INDICES = tuple(
+    range(1, BETTING_ACTION_COUNT)
+)
+
+LEGACY_ACTION_RENAMES = {
+    "legacy_fraction": "legacy_fraction",
+    "minimum": "minimum",
+    "five_percent": "bet_05_percent",
+    "controlled_recovery": "bet_10_percent",
+    "take_second": "bet_100_percent",
+    "take_first": "bet_100_percent",
+    "quarter_gap_to_second": "bet_20_percent",
+    "half_gap_to_second": "bet_50_percent",
+    "full_gap_to_second": "bet_100_percent",
+    "quarter_gap_to_first": "bet_20_percent",
+    "half_gap_to_first": "bet_50_percent",
+    "full_gap_to_first": "bet_100_percent",
+    "cover_visible_bets": "bet_30_percent",
+    "half_bankroll": "bet_50_percent",
+    "all_in": "bet_100_percent",
+    "protect_lead": "minimum",
+}
+
+for old_percentage in range(5, 101, 5):
+    old_name = f"bet_{old_percentage:02d}_percent"
+    closest_percentage = min(
+        BETTING_PERCENTAGES,
+        key=lambda percentage: (
+            abs(percentage - old_percentage),
+            percentage,
+        ),
+    )
+    LEGACY_ACTION_RENAMES[old_name] = (
+        f"bet_{closest_percentage:02d}_percent"
+    )
 
 
 class BettingNetwork:
@@ -78,6 +164,7 @@ class BettingNetwork:
         self.action_biases = np.zeros(
             BETTING_ACTION_COUNT
         )
+        self.action_biases[0] = -1_000_000.0
 
     def _hidden_values(self, features):
         if len(features) != BETTING_FEATURE_COUNT:
@@ -132,8 +219,11 @@ class BettingNetwork:
         if not 0 <= action_index < BETTING_ACTION_COUNT:
             raise ValueError("action_index is outside the action set")
 
-        self.action_biases.fill(-0.25)
-        self.action_biases[action_index] = 0.75
+        # Cover every action without locking a policy into one global choice.
+        self.action_biases.fill(-0.05)
+        if action_index != 0:
+            self.action_biases[0] = -1_000_000.0
+        self.action_biases[action_index] = 0.05
 
     def clone(self):
 
@@ -187,17 +277,23 @@ class BettingNetwork:
         for parameter_name in parameter_names:
             parameter = getattr(self, parameter_name)
 
+            parameter_mutation_rate = mutation_rate
+            parameter_mutation_strength = mutation_strength
+            if parameter_name in {"action_weights", "action_biases"}:
+                parameter_mutation_rate = min(1.0, mutation_rate * 3.0)
+                parameter_mutation_strength = mutation_strength * 1.5
+
             mutation_mask = (
                 self.random_generator.random(
                      size=parameter.shape
                 )
-                < mutation_rate
+                < parameter_mutation_rate
             )
 
             mutation_noise = (
                 self.random_generator.normal(
                     loc=0.0,
-                    scale=mutation_strength,
+                    scale=parameter_mutation_strength,
                     size=parameter.shape,
                 )
             )
@@ -300,11 +396,48 @@ class BettingNetwork:
                     dtype=float,
                 )
 
+                historical_action_names = None
+                for action_names in (
+                    LEGACY_BETTING_ACTION_NAMES,
+                    MACRO_BETTING_ACTION_NAMES,
+                    FIVE_PERCENT_BETTING_ACTION_NAMES,
+                ):
+                    historical_shape = (
+                        (len(action_names), 16)
+                        if parameter_name == "action_weights"
+                        else (len(action_names),)
+                    )
+                    if (
+                        parameter_name in {"action_weights", "action_biases"}
+                        and parameter.shape == historical_shape
+                    ):
+                        historical_action_names = action_names
+                        break
+
+                if historical_action_names is not None:
+                    fill_value = (
+                        0.0
+                        if parameter_name == "action_weights"
+                        else -1_000_000.0
+                    )
+                    expanded_parameter = np.full(
+                        expected_shape,
+                        fill_value,
+                        dtype=float,
+                    )
+                    for old_index, old_name in enumerate(
+                        historical_action_names
+                    ):
+                        current_name = LEGACY_ACTION_RENAMES[old_name]
+                        current_index = BETTING_ACTION_NAMES.index(current_name)
+                        expanded_parameter[current_index] = parameter[old_index]
+                    parameter = expanded_parameter
+
                 if (
                     parameter_name == "weights1"
                     and parameter.ndim == 2
                     and parameter.shape[0] == 32
-                    and parameter.shape[1] in {46, 52}
+                    and parameter.shape[1] in {46, 52, 57}
                 ):
                     parameter = np.pad(
                         parameter,

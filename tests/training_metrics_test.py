@@ -64,6 +64,13 @@ def test_build_generation_record_flattens_training_and_diversity_metrics(
             "unique_policy_count": 41,
             "unique_policy_rate": 41 / 70,
         },
+        "contextual_probe_results": {
+            "early_tied": {
+                "action_index": 1,
+                "action_name": "minimum",
+                "legal_bet": 100,
+            },
+        },
     }
     original_result = copy.deepcopy(generation_result)
 
@@ -106,6 +113,9 @@ def test_build_generation_record_flattens_training_and_diversity_metrics(
         assert record[
             f"action_{action_name}"
         ] == pytest.approx(percentage)
+
+    assert record["probe_early_tied_action_index"] == 1
+    assert record["probe_early_tied_legal_bet"] == 100
 
     assert generation_result == original_result
     assert default_record["verified_score"] is None

@@ -33,21 +33,32 @@ from agents.unpredictable_betting_agent import (
 from ml.strategy_diversity import (
     measure_strategy_diversity
 )
+from ml.betting_probes import evaluate_contextual_training_probes
 
 
 FIRST_PLACE_FITNESS = 1.05
 SECOND_PLACE_FITNESS = 1.0
+TRAINING_FIRST_PLACE_FITNESS = 1.5
+TRAINING_SECOND_PLACE_FITNESS = 1.0
+CHECKPOINT_VALIDATION_BATCHES = 3
+CHECKPOINT_MINIMUM_IMPROVEMENT = 0.01
+CHECKPOINT_CATEGORY_REGRESSION_TOLERANCE = 0.03
+CHECKPOINT_BANKRUPTCY_REGRESSION_TOLERANCE = 0.01
+CHECKPOINT_CATEGORY_METRICS = (
+    "benchmark_normal_fitness",
+    "benchmark_mid_fitness",
+    "benchmark_late_fitness",
+    "benchmark_holdout_fitness",
+    "benchmark_minimum_holdout_fitness",
+    "benchmark_human_holdout_fitness",
+)
 
 
-def advancement_fitness_for_tie(
+def _placement_fitness_for_tie(
     tie_start,
     tie_end,
+    position_fitness,
 ):
-    position_fitness = (
-        FIRST_PLACE_FITNESS,
-        SECOND_PLACE_FITNESS,
-    )
-
     occupied_fitness = [
         (
             position_fitness[position]
@@ -60,10 +71,39 @@ def advancement_fitness_for_tie(
     return sum(occupied_fitness) / len(occupied_fitness)
 
 
+def advancement_fitness_for_tie(
+    tie_start,
+    tie_end,
+):
+    return _placement_fitness_for_tie(
+        tie_start,
+        tie_end,
+        (
+            FIRST_PLACE_FITNESS,
+            SECOND_PLACE_FITNESS,
+        ),
+    )
+
+
+def training_placement_fitness_for_tie(
+    tie_start,
+    tie_end,
+):
+    return _placement_fitness_for_tie(
+        tie_start,
+        tie_end,
+        (
+            TRAINING_FIRST_PLACE_FITNESS,
+            TRAINING_SECOND_PLACE_FITNESS,
+        ),
+    )
+
+
 def training_progress_fitness(
     starting_bankrolls,
     final_bankrolls,
     seat_index,
+    gap_closure_multiplier=1.0,
 ):
     """Small dense reward used only while evolving networks."""
     starting_bankroll = starting_bankrolls[seat_index]
@@ -81,34 +121,52 @@ def training_progress_fitness(
         0.05 * max(0, starting_rank - final_rank),
     )
 
-    starting_second = sorted(
+    sorted_starting_bankrolls = sorted(
         starting_bankrolls,
         reverse=True,
-    )[1]
-    final_second = sorted(
+    )
+    sorted_final_bankrolls = sorted(
         final_bankrolls,
         reverse=True,
-    )[1]
-    starting_gap = max(
-        0,
-        starting_second - starting_bankroll,
-    )
-    final_gap = max(
-        0,
-        final_second - final_bankroll,
     )
 
-    gap_credit = 0.0
-    if starting_gap > 0:
+    if starting_rank > 2:
+        starting_target = sorted_starting_bankrolls[1]
+        final_target = sorted_final_bankrolls[1]
+        target_weight = 0.15
+    elif starting_rank == 2:
+        starting_target = sorted_starting_bankrolls[0]
+        final_target = sorted_final_bankrolls[0]
+        target_weight = 0.20
+    else:
+        starting_target = starting_bankroll
+        final_target = final_bankroll
+        target_weight = 0.0
+
+    starting_target_gap = max(
+        0,
+        starting_target - starting_bankroll,
+    )
+    final_target_gap = max(
+        0,
+        final_target - final_bankroll,
+    )
+
+    target_credit = 0.0
+    if starting_target_gap > 0:
         closure_fraction = max(
             0.0,
             min(
                 1.0,
-                (starting_gap - final_gap)
-                / starting_gap,
+                (starting_target_gap - final_target_gap)
+                / starting_target_gap,
             ),
         )
-        gap_credit = 0.25 * closure_fraction
+        target_credit = (
+            target_weight
+            * gap_closure_multiplier
+            * closure_fraction
+        )
 
     def top_two_safety_margin(bankrolls):
         if len(bankrolls) < 3:
@@ -148,18 +206,23 @@ def training_progress_fitness(
         lead_margin(final_bankrolls)
         - lead_margin(starting_bankrolls),
     )
-    safety_credit = 0.15 * min(
-        1.0,
-        safety_improvement / margin_scale,
-    )
-    lead_credit = 0.10 * min(
-        1.0,
-        lead_improvement / margin_scale,
-    )
+    safety_credit = 0.0
+    if starting_rank == 2:
+        safety_credit = 0.15 * min(
+            1.0,
+            safety_improvement / margin_scale,
+        )
+
+    lead_credit = 0.0
+    if starting_rank == 1:
+        lead_credit = 0.20 * min(
+            1.0,
+            lead_improvement / margin_scale,
+        )
 
     return (
         rank_credit
-        + gap_credit
+        + target_credit
         + safety_credit
         + lead_credit
     )
@@ -324,6 +387,7 @@ class Trainer:
         self,
         network,
         table_kind=None,
+        focal_agent=None,
     ):
         """Build a table from the human/strategy/champion league mixture."""
         if table_kind is None:
@@ -348,9 +412,9 @@ class Trainer:
         elif table_kind == "adversarial":
             table_kind = "extreme"
 
-        competitors = [
-            ("neural", NeuralBettingAgent(network))
-        ]
+        if focal_agent is None:
+            focal_agent = NeuralBettingAgent(network)
+        competitors = [("neural", focal_agent)]
 
         if table_kind == "minimum":
             competitors.extend(
@@ -367,6 +431,7 @@ class Trainer:
                 return self.create_training_baseline_competitors(
                     network,
                     table_kind="adaptive",
+                    focal_agent=focal_agent,
                 )
 
             champion_count = min(
@@ -541,6 +606,7 @@ class Trainer:
 
     def create_human_behavior_agent(
         self,
+        randomize_personality=True,
         **kwargs,
     ):
         seed = int(
@@ -549,17 +615,44 @@ class Trainer:
                 2**32,
             )
         )
+        if randomize_personality:
+            generator = self.population.random_generator
+            base_fraction = kwargs.setdefault(
+                "base_fraction",
+                float(generator.uniform(0.01, 0.10)),
+            )
+            kwargs.setdefault(
+                "maximum_fraction",
+                float(generator.uniform(max(0.15, base_fraction), 1.0)),
+            )
+            kwargs.setdefault("loss_multiplier", float(generator.uniform(1.1, 2.5)))
+            kwargs.setdefault("win_multiplier", float(generator.uniform(1.05, 2.0)))
+            kwargs.setdefault("impulse_probability", float(generator.uniform(0.03, 0.20)))
+            kwargs.setdefault("copy_probability", float(generator.uniform(0.05, 0.30)))
+            kwargs.setdefault("protect_probability", float(generator.uniform(0.40, 0.90)))
+            kwargs.setdefault("tilt_probability", float(generator.uniform(0.10, 0.50)))
+            kwargs.setdefault(
+                "all_in_probability",
+                float(generator.uniform(0.001, 0.02)),
+            )
+            kwargs.setdefault(
+                "desperation_probability",
+                float(generator.uniform(0.15, 0.55)),
+            )
+            kwargs.setdefault("mode_persistence", int(generator.integers(2, 6)))
+
         return HumanBehaviorAgent(seed=seed, **kwargs)
 
     def create_fixed_benchmark_competitors(
         self,
         network,
         lineup_kind,
+        focal_agent=None,
     ):
         """Build one of several strict, repeatable holdout lineups."""
-        competitors = [
-            ("neural", NeuralBettingAgent(network))
-        ]
+        if focal_agent is None:
+            focal_agent = NeuralBettingAgent(network)
+        competitors = [("neural", focal_agent)]
 
         if lineup_kind == "adaptive":
             opponents = [
@@ -583,6 +676,7 @@ class Trainer:
                 (
                     "adaptive_human",
                     self.create_human_behavior_agent(
+                        randomize_personality=False,
                         base_fraction=0.05,
                         maximum_fraction=0.25,
                     ),
@@ -604,6 +698,7 @@ class Trainer:
                 (
                     "cautious_human",
                     self.create_human_behavior_agent(
+                        randomize_personality=False,
                         base_fraction=0.03,
                         maximum_fraction=0.15,
                     ),
@@ -619,6 +714,7 @@ class Trainer:
                 (
                     "cautious_human",
                     self.create_human_behavior_agent(
+                        randomize_personality=False,
                         base_fraction=0.03,
                         maximum_fraction=0.15,
                     ),
@@ -626,6 +722,7 @@ class Trainer:
                 (
                     "balanced_human",
                     self.create_human_behavior_agent(
+                        randomize_personality=False,
                         base_fraction=0.05,
                         maximum_fraction=0.25,
                     ),
@@ -633,6 +730,7 @@ class Trainer:
                 (
                     "bold_human",
                     self.create_human_behavior_agent(
+                        randomize_personality=False,
                         base_fraction=0.08,
                         maximum_fraction=0.40,
                         loss_multiplier=1.75,
@@ -648,6 +746,21 @@ class Trainer:
                     ),
                 ),
             ]
+        elif lineup_kind == "randomized_human":
+            opponents = [
+                (
+                    f"randomized_human_{index}",
+                    self.create_human_behavior_agent(),
+                )
+                for index in range(1, 4)
+            ]
+            opponents.extend(
+                (
+                    ("minimum_control", BasicStrategyAgent()),
+                    ("balanced_chaser", ChasingAgent(0.55, 0.40)),
+                    ("lead_protector", LeadProtectionAgent()),
+                )
+            )
         elif lineup_kind == "risk_taker":
             opponents = [
                 ("minimum_control", BasicStrategyAgent()),
@@ -676,7 +789,8 @@ class Trainer:
             ]
         else:
             raise ValueError(
-                "lineup_kind must be adaptive, disciplined, human, risk_taker, or minimum"
+                "lineup_kind must be adaptive, disciplined, human, "
+                "randomized_human, risk_taker, or minimum"
             )
 
         competitors.extend(opponents)
@@ -917,21 +1031,30 @@ class Trainer:
             self.population.random_generator.random()
         )
 
-        if stage_roll < 0.45:
+        if stage_roll < 0.65:
             return "normal"
-        if stage_roll < 0.75:
+        if stage_roll < 0.85:
             return "mid"
-        if stage_roll < 0.95:
-            return "late"
-        return "extreme"
+        return "late"
+
+    @staticmethod
+    def gap_closure_multiplier_for_stage(stage):
+        return {
+            "normal": 0.0,
+            "mid": 0.25,
+            "late": 1.0,
+            "extreme": 0.50,
+        }[stage]
 
     def evaluate_group(self, network_indices):
         if len(network_indices) != 7:
             raise ValueError("There must be 7 players per table")
 
+        stage = self.select_training_stage()
         players, total_rounds, completed_rounds = (
             self.create_tournament_scenario(
-                len(network_indices)
+                len(network_indices),
+                stage=stage,
             )
         )
         agents = []
@@ -969,6 +1092,9 @@ class Trainer:
             network_indices,
             rankings,
             starting_bankrolls=starting_bankrolls,
+            gap_closure_multiplier=(
+                self.gap_closure_multiplier_for_stage(stage)
+            ),
         )
 
         return rankings
@@ -978,6 +1104,7 @@ class Trainer:
         network_indices,
         rankings,
         starting_bankrolls=None,
+        gap_closure_multiplier=1.0,
     ):
         position = 0
 
@@ -994,7 +1121,7 @@ class Trainer:
                 tie_end += 1
 
             shared_credit = (
-                advancement_fitness_for_tie(
+                training_placement_fitness_for_tie(
                     position,
                     tie_end,
                 )
@@ -1033,6 +1160,7 @@ class Trainer:
                         starting_bankrolls,
                         final_bankrolls,
                         seat_index,
+                        gap_closure_multiplier=gap_closure_multiplier,
                     ) * self.training_shaping_multiplier(),
                 )
     def evaluate_generation(
@@ -1179,8 +1307,20 @@ class Trainer:
         benchmark_late_fitness = None
         benchmark_holdout_fitness = None
         benchmark_minimum_holdout_fitness = None
+        benchmark_human_holdout_fitness = None
         benchmark_selection_fitness = None
+        benchmark_raw_selection_fitness = None
+        benchmark_advantage_fitness = None
+        benchmark_normal_advantage = None
+        benchmark_mid_advantage = None
+        benchmark_late_advantage = None
+        benchmark_holdout_advantage = None
+        benchmark_minimum_holdout_advantage = None
+        benchmark_human_holdout_advantage = None
         best_benchmark_key = None
+        benchmark_candidate_records = []
+        benchmark_parent_indices = []
+        benchmark_parent_styles = []
         league_promoted = False
 
         if benchmark_tournaments > 0:
@@ -1228,55 +1368,134 @@ class Trainer:
                 candidate_late = None
                 candidate_holdout = None
                 candidate_minimum_holdout = None
+                candidate_human_holdout = None
+                candidate_normal_advantage = None
+                candidate_mid_advantage = None
+                candidate_late_advantage = None
+                candidate_holdout_advantage = None
+                candidate_minimum_holdout_advantage = None
+                candidate_human_holdout_advantage = None
+                candidate_normal_bankruptcy = 0.0
+                candidate_mid_bankruptcy = 0.0
+                candidate_late_bankruptcy = 0.0
 
                 if normal_tournaments > 0:
-                    candidate_normal = (
-                        self.evaluate_network_against_fixed_benchmark(
+                    paired_result = self.evaluate_advantage_over_minimum(
                             candidate_network,
                             normal_tournaments,
                             stage="normal",
-                        )
+                    )
+                    candidate_normal = paired_result.get(
+                        "candidate_top_two_rate",
+                        paired_result["candidate_score"],
+                    )
+                    candidate_normal_advantage = paired_result.get(
+                        "top_two_advantage",
+                        paired_result["advantage"],
+                    )
+                    candidate_normal_bankruptcy = paired_result.get(
+                        "candidate_bankruptcy_rate",
+                        0.0,
                     )
 
                 if mid_tournaments > 0:
-                    candidate_mid = (
-                        self.evaluate_network_against_fixed_benchmark(
+                    paired_result = self.evaluate_advantage_over_minimum(
                             candidate_network,
                             mid_tournaments,
                             stage="mid",
-                        )
+                    )
+                    candidate_mid = paired_result.get(
+                        "candidate_top_two_rate",
+                        paired_result["candidate_score"],
+                    )
+                    candidate_mid_advantage = paired_result.get(
+                        "top_two_advantage",
+                        paired_result["advantage"],
+                    )
+                    candidate_mid_bankruptcy = paired_result.get(
+                        "candidate_bankruptcy_rate",
+                        0.0,
                     )
 
                 if late_tournaments > 0:
-                    candidate_late = (
-                        self.evaluate_network_against_fixed_benchmark(
+                    paired_result = self.evaluate_advantage_over_minimum(
                             candidate_network,
                             late_tournaments,
                             stage="late",
-                        )
+                    )
+                    candidate_late = paired_result.get(
+                        "candidate_top_two_rate",
+                        paired_result["candidate_score"],
+                    )
+                    candidate_late_advantage = paired_result.get(
+                        "top_two_advantage",
+                        paired_result["advantage"],
+                    )
+                    candidate_late_bankruptcy = paired_result.get(
+                        "candidate_bankruptcy_rate",
+                        0.0,
                     )
 
                 holdout_tournaments = max(
                     10,
                     benchmark_tournaments // 5,
                 )
-                candidate_holdout = (
-                    self.evaluate_network_against_fixed_benchmark(
+                paired_result = self.evaluate_advantage_over_minimum(
                         candidate_network,
                         holdout_tournaments,
                         stage="normal",
                         lineup_kind="disciplined",
                         full_tournament=True,
-                    )
                 )
-                candidate_minimum_holdout = (
-                    self.evaluate_network_against_fixed_benchmark(
+                candidate_holdout = paired_result.get(
+                    "candidate_top_two_rate",
+                    paired_result["candidate_score"],
+                )
+                candidate_holdout_advantage = paired_result.get(
+                    "top_two_advantage",
+                    paired_result["advantage"],
+                )
+                candidate_holdout_bankruptcy = paired_result.get(
+                    "candidate_bankruptcy_rate",
+                    0.0,
+                )
+                paired_result = self.evaluate_advantage_over_minimum(
                         candidate_network,
                         holdout_tournaments,
                         stage="normal",
                         lineup_kind="minimum",
                         full_tournament=True,
-                    )
+                )
+                candidate_minimum_holdout = paired_result.get(
+                    "candidate_top_two_rate",
+                    paired_result["candidate_score"],
+                )
+                candidate_minimum_holdout_advantage = paired_result.get(
+                    "top_two_advantage",
+                    paired_result["advantage"],
+                )
+                candidate_minimum_holdout_bankruptcy = paired_result.get(
+                    "candidate_bankruptcy_rate",
+                    0.0,
+                )
+                paired_result = self.evaluate_advantage_over_minimum(
+                        candidate_network,
+                        holdout_tournaments,
+                        stage="normal",
+                        lineup_kind="randomized_human",
+                        full_tournament=True,
+                )
+                candidate_human_holdout = paired_result.get(
+                    "candidate_top_two_rate",
+                    paired_result["candidate_score"],
+                )
+                candidate_human_holdout_advantage = paired_result.get(
+                    "top_two_advantage",
+                    paired_result["advantage"],
+                )
+                candidate_human_holdout_bankruptcy = paired_result.get(
+                    "candidate_bankruptcy_rate",
+                    0.0,
                 )
 
                 candidate_total = (
@@ -1292,16 +1511,51 @@ class Trainer:
                     candidate_total
                     / benchmark_tournaments
                 )
-                candidate_selection = (
-                    0.45 * candidate_benchmark
-                    + 0.45 * candidate_holdout
+                candidate_raw_selection = (
+                    0.40 * candidate_benchmark
+                    + 0.35 * candidate_holdout
+                    + 0.15 * candidate_human_holdout
                     + 0.10 * candidate_minimum_holdout
+                )
+                candidate_advantage = (
+                    (
+                        (candidate_normal_advantage or 0.0)
+                        * normal_tournaments
+                        + (candidate_mid_advantage or 0.0)
+                        * mid_tournaments
+                        + (candidate_late_advantage or 0.0)
+                        * late_tournaments
+                    )
+                    / benchmark_tournaments
+                )
+                candidate_selection = (
+                    0.40 * candidate_advantage
+                    + 0.35 * candidate_holdout_advantage
+                    + 0.15 * candidate_human_holdout_advantage
+                    + 0.10 * candidate_minimum_holdout_advantage
+                )
+                candidate_staged_bankruptcy = (
+                    candidate_normal_bankruptcy * normal_tournaments
+                    + candidate_mid_bankruptcy * mid_tournaments
+                    + candidate_late_bankruptcy * late_tournaments
+                ) / benchmark_tournaments
+                candidate_bankruptcy = (
+                    0.40 * candidate_staged_bankruptcy
+                    + 0.35 * candidate_holdout_bankruptcy
+                    + 0.15 * candidate_human_holdout_bankruptcy
+                    + 0.10 * candidate_minimum_holdout_bankruptcy
                 )
 
                 candidate_key = (
-                    candidate_late is not None
-                    and candidate_late > 0,
+                    candidate_raw_selection,
                     candidate_selection,
+                )
+                benchmark_candidate_records.append(
+                    {
+                        "network_index": candidate_index,
+                        "key": candidate_key,
+                        "bankruptcy_rate": candidate_bankruptcy,
+                    }
                 )
 
                 if (
@@ -1329,9 +1583,94 @@ class Trainer:
                     benchmark_minimum_holdout_fitness = (
                         candidate_minimum_holdout
                     )
+                    benchmark_human_holdout_fitness = (
+                        candidate_human_holdout
+                    )
                     benchmark_selection_fitness = (
                         candidate_selection
                     )
+                    benchmark_raw_selection_fitness = (
+                        candidate_raw_selection
+                    )
+                    benchmark_advantage_fitness = candidate_advantage
+                    benchmark_normal_advantage = candidate_normal_advantage
+                    benchmark_mid_advantage = candidate_mid_advantage
+                    benchmark_late_advantage = candidate_late_advantage
+                    benchmark_holdout_advantage = candidate_holdout_advantage
+                    benchmark_minimum_holdout_advantage = (
+                        candidate_minimum_holdout_advantage
+                    )
+                    benchmark_human_holdout_advantage = (
+                        candidate_human_holdout_advantage
+                    )
+
+            benchmark_candidate_records.sort(
+                key=lambda record: record["key"],
+                reverse=True,
+            )
+
+            def risk_style(record):
+                bankruptcy_rate = record["bankruptcy_rate"]
+                if bankruptcy_rate <= 0.02:
+                    return "safe"
+                if bankruptcy_rate <= 0.10:
+                    return "balanced"
+                return "aggressive"
+
+            # Keep the overall benchmark winner, then preserve the best
+            # available representative of every risk family. Fill remaining
+            # parent slots by benchmark rank, not raw self-play fitness.
+            selected_records = []
+            if benchmark_candidate_records:
+                selected_records.append(benchmark_candidate_records[0])
+            for style in ("safe", "balanced", "aggressive"):
+                style_record = next(
+                    (
+                        record
+                        for record in benchmark_candidate_records
+                        if risk_style(record) == style
+                        and record not in selected_records
+                    ),
+                    None,
+                )
+                if style_record is not None:
+                    selected_records.append(style_record)
+            for record in benchmark_candidate_records:
+                if len(selected_records) >= self.population.elite_count:
+                    break
+                if record not in selected_records:
+                    selected_records.append(record)
+
+            # A small benchmark candidate pool can contain fewer networks
+            # than the configured elite count. Fall back to raw self-play only
+            # for the unfilled parent slots.
+            selected_indices = {
+                record["network_index"] for record in selected_records
+            }
+            for network_index in ranked_indices:
+                if len(selected_records) >= self.population.elite_count:
+                    break
+                if network_index not in selected_indices:
+                    selected_records.append(
+                        {
+                            "network_index": network_index,
+                            "key": (float("-inf"), float("-inf")),
+                            "bankruptcy_rate": 0.0,
+                            "style": "self_play_fallback",
+                        }
+                    )
+                    selected_indices.add(network_index)
+
+            selected_records = selected_records[
+                :self.population.elite_count
+            ]
+            benchmark_parent_indices = [
+                record["network_index"] for record in selected_records
+            ]
+            benchmark_parent_styles = [
+                record.get("style", risk_style(record))
+                for record in selected_records
+            ]
 
             league_promoted = self.maybe_promote_to_league(
                 best_network,
@@ -1353,6 +1692,9 @@ class Trainer:
         )
 
         strategy_diversity = measure_strategy_diversity(self.population.networks)
+        contextual_probe_results = evaluate_contextual_training_probes(
+            best_network
+        )
 
         population_best_fitness = float(max(fitness_scores))
 
@@ -1360,7 +1702,13 @@ class Trainer:
 
         population_fitness_std = float(np.std(fitness_scores))
 
-        self.population.create_next_generation()
+        self.population.create_next_generation(
+            elite_indices=(
+                benchmark_parent_indices
+                if benchmark_parent_indices
+                else None
+            )
+        )
 
 
         return {
@@ -1387,12 +1735,32 @@ class Trainer:
             "benchmark_minimum_holdout_fitness": (
                 benchmark_minimum_holdout_fitness
             ),
+            "benchmark_human_holdout_fitness": (
+                benchmark_human_holdout_fitness
+            ),
             "benchmark_selection_fitness": (
                 benchmark_selection_fitness
             ),
+            "benchmark_raw_selection_fitness": (
+                benchmark_raw_selection_fitness
+            ),
+            "benchmark_advantage_fitness": benchmark_advantage_fitness,
+            "benchmark_normal_advantage": benchmark_normal_advantage,
+            "benchmark_mid_advantage": benchmark_mid_advantage,
+            "benchmark_late_advantage": benchmark_late_advantage,
+            "benchmark_holdout_advantage": benchmark_holdout_advantage,
+            "benchmark_minimum_holdout_advantage": (
+                benchmark_minimum_holdout_advantage
+            ),
+            "benchmark_human_holdout_advantage": (
+                benchmark_human_holdout_advantage
+            ),
             "league_promoted": league_promoted,
             "league_size": len(self.champion_league),
+            "benchmark_parent_indices": benchmark_parent_indices,
+            "benchmark_parent_styles": benchmark_parent_styles,
             "strategy_diversity": strategy_diversity,
+            "contextual_probe_results": contextual_probe_results,
             "population_best_fitness": population_best_fitness,
             "population_worst_fitness": population_worst_fitness,
             "population_fitness_std": population_fitness_std
@@ -1425,55 +1793,121 @@ class Trainer:
             benchmark_tournaments // 5,
         )
 
-        normal_fitness = (
-            self.evaluate_network_against_fixed_benchmark(
+        normal_result = self.evaluate_advantage_over_minimum(
                 network,
                 normal_tournaments,
                 stage="normal",
-            )
         )
-        mid_fitness = (
-            self.evaluate_network_against_fixed_benchmark(
+        mid_result = self.evaluate_advantage_over_minimum(
                 network,
                 mid_tournaments,
                 stage="mid",
-            )
         )
-        late_fitness = (
-            self.evaluate_network_against_fixed_benchmark(
+        late_result = self.evaluate_advantage_over_minimum(
                 network,
                 late_tournaments,
                 stage="late",
-            )
         )
-        holdout_fitness = (
-            self.evaluate_network_against_fixed_benchmark(
+        holdout_result = self.evaluate_advantage_over_minimum(
                 network,
                 holdout_tournaments,
                 stage="normal",
                 lineup_kind="disciplined",
                 full_tournament=True,
-            )
         )
-        minimum_holdout_fitness = (
-            self.evaluate_network_against_fixed_benchmark(
+        minimum_holdout_result = self.evaluate_advantage_over_minimum(
                 network,
                 holdout_tournaments,
                 stage="normal",
                 lineup_kind="minimum",
                 full_tournament=True,
-            )
+        )
+        human_holdout_result = self.evaluate_advantage_over_minimum(
+                network,
+                holdout_tournaments,
+                stage="normal",
+                lineup_kind="randomized_human",
+                full_tournament=True,
+        )
+        normal_fitness = normal_result["candidate_score"]
+        mid_fitness = mid_result["candidate_score"]
+        late_fitness = late_result["candidate_score"]
+        holdout_fitness = holdout_result["candidate_score"]
+        minimum_holdout_fitness = minimum_holdout_result["candidate_score"]
+        human_holdout_fitness = human_holdout_result["candidate_score"]
+        def candidate_metric(result, name, fallback):
+            return result.get(name, result[fallback])
+
+        normal_top_two = candidate_metric(
+            normal_result, "candidate_top_two_rate", "candidate_score"
+        )
+        mid_top_two = candidate_metric(
+            mid_result, "candidate_top_two_rate", "candidate_score"
+        )
+        late_top_two = candidate_metric(
+            late_result, "candidate_top_two_rate", "candidate_score"
+        )
+        holdout_top_two = candidate_metric(
+            holdout_result, "candidate_top_two_rate", "candidate_score"
+        )
+        minimum_holdout_top_two = candidate_metric(
+            minimum_holdout_result,
+            "candidate_top_two_rate",
+            "candidate_score",
+        )
+        human_holdout_top_two = candidate_metric(
+            human_holdout_result,
+            "candidate_top_two_rate",
+            "candidate_score",
         )
         staged_fitness = (
             normal_fitness * normal_tournaments
             + mid_fitness * mid_tournaments
             + late_fitness * late_tournaments
         ) / benchmark_tournaments
-        selection_fitness = (
-            0.45 * staged_fitness
-            + 0.45 * holdout_fitness
-            + 0.10 * minimum_holdout_fitness
+        staged_top_two = (
+            normal_top_two * normal_tournaments
+            + mid_top_two * mid_tournaments
+            + late_top_two * late_tournaments
+        ) / benchmark_tournaments
+        raw_selection_fitness = (
+            0.40 * staged_top_two
+            + 0.35 * holdout_top_two
+            + 0.15 * human_holdout_top_two
+            + 0.10 * minimum_holdout_top_two
         )
+        staged_advantage = (
+            normal_result["advantage"] * normal_tournaments
+            + mid_result["advantage"] * mid_tournaments
+            + late_result["advantage"] * late_tournaments
+        ) / benchmark_tournaments
+        def top_two_advantage(result):
+            return result.get("top_two_advantage", result["advantage"])
+
+        staged_top_two_advantage = (
+            top_two_advantage(normal_result) * normal_tournaments
+            + top_two_advantage(mid_result) * mid_tournaments
+            + top_two_advantage(late_result) * late_tournaments
+        ) / benchmark_tournaments
+        selection_fitness = (
+            0.40 * staged_top_two_advantage
+            + 0.35 * top_two_advantage(holdout_result)
+            + 0.15 * top_two_advantage(human_holdout_result)
+            + 0.10 * top_two_advantage(minimum_holdout_result)
+        )
+
+        def weighted_diagnostic(name):
+            staged = (
+                normal_result.get(name, 0.0) * normal_tournaments
+                + mid_result.get(name, 0.0) * mid_tournaments
+                + late_result.get(name, 0.0) * late_tournaments
+            ) / benchmark_tournaments
+            return (
+                0.40 * staged
+                + 0.35 * holdout_result.get(name, 0.0)
+                + 0.15 * human_holdout_result.get(name, 0.0)
+                + 0.10 * minimum_holdout_result.get(name, 0.0)
+            )
 
         return {
             "benchmark_fitness": staged_fitness,
@@ -1484,7 +1918,30 @@ class Trainer:
             "benchmark_minimum_holdout_fitness": (
                 minimum_holdout_fitness
             ),
+            "benchmark_human_holdout_fitness": human_holdout_fitness,
             "benchmark_selection_fitness": selection_fitness,
+            "benchmark_raw_selection_fitness": raw_selection_fitness,
+            "benchmark_top_two_rate": raw_selection_fitness,
+            "benchmark_first_place_rate": weighted_diagnostic(
+                "candidate_first_place_rate"
+            ),
+            "benchmark_average_position": weighted_diagnostic(
+                "candidate_average_position"
+            ),
+            "benchmark_bankruptcy_rate": weighted_diagnostic(
+                "candidate_bankruptcy_rate"
+            ),
+            "benchmark_advantage_fitness": staged_advantage,
+            "benchmark_normal_advantage": normal_result["advantage"],
+            "benchmark_mid_advantage": mid_result["advantage"],
+            "benchmark_late_advantage": late_result["advantage"],
+            "benchmark_holdout_advantage": holdout_result["advantage"],
+            "benchmark_minimum_holdout_advantage": (
+                minimum_holdout_result["advantage"]
+            ),
+            "benchmark_human_holdout_advantage": (
+                human_holdout_result["advantage"]
+            ),
         }
 
     def compare_checkpoint_networks(
@@ -1493,25 +1950,168 @@ class Trainer:
         incumbent,
         benchmark_tournaments,
     ):
-        """Compare checkpoint candidates on an independent common batch."""
-        numpy_state = copy.deepcopy(
+        """Compare checkpoints on fresh, matched validation batches."""
+        if benchmark_tournaments < CHECKPOINT_VALIDATION_BATCHES:
+            raise ValueError(
+                "benchmark_tournaments must cover every validation batch"
+            )
+
+        validation_seeds = [
+            int(self.population.random_generator.integers(0, 2**32))
+            for _ in range(CHECKPOINT_VALIDATION_BATCHES)
+        ]
+        post_seed_numpy_state = copy.deepcopy(
             self.population.random_generator.bit_generator.state
         )
-        python_state = random.getstate()
-        challenger_metrics = self.evaluate_robust_checkpoint(
-            challenger,
+        original_python_state = random.getstate()
+        base_batch_size, remainder = divmod(
             benchmark_tournaments,
+            CHECKPOINT_VALIDATION_BATCHES,
         )
+        batch_sizes = [
+            base_batch_size + (batch_index < remainder)
+            for batch_index in range(CHECKPOINT_VALIDATION_BATCHES)
+        ]
+        challenger_batches = []
+        incumbent_batches = []
 
-        incumbent_metrics = None
-        if incumbent is not None:
+        try:
+            for validation_seed, batch_size in zip(
+                validation_seeds,
+                batch_sizes,
+            ):
+                fixed_numpy_state = copy.deepcopy(
+                    np.random.default_rng(
+                        validation_seed
+                    ).bit_generator.state
+                )
+                self.population.random_generator.bit_generator.state = (
+                    copy.deepcopy(fixed_numpy_state)
+                )
+                random.seed(validation_seed)
+                challenger_batches.append(
+                    self.evaluate_robust_checkpoint(
+                        challenger,
+                        batch_size,
+                    )
+                )
+
+                if incumbent is not None:
+                    self.population.random_generator.bit_generator.state = (
+                        copy.deepcopy(fixed_numpy_state)
+                    )
+                    random.seed(validation_seed)
+                    incumbent_batches.append(
+                        self.evaluate_robust_checkpoint(
+                            incumbent,
+                            batch_size,
+                        )
+                    )
+        finally:
             self.population.random_generator.bit_generator.state = (
-                copy.deepcopy(numpy_state)
+                post_seed_numpy_state
             )
-            random.setstate(python_state)
-            incumbent_metrics = self.evaluate_robust_checkpoint(
-                incumbent,
-                benchmark_tournaments,
+            random.setstate(original_python_state)
+
+        def average_metrics(metric_batches):
+            return {
+                metric_name: sum(
+                    batch[metric_name]
+                    for batch in metric_batches
+                ) / len(metric_batches)
+                for metric_name in metric_batches[0]
+            }
+
+        challenger_metrics = average_metrics(challenger_batches)
+        challenger_metrics["checkpoint_batch_count"] = len(
+            challenger_batches
+        )
+        incumbent_metrics = None
+        if incumbent is None:
+            challenger_metrics["checkpoint_batches_won"] = len(
+                challenger_batches
+            )
+            challenger_metrics["checkpoint_improvement"] = None
+            challenger_metrics["checkpoint_accepted"] = True
+        else:
+            incumbent_metrics = average_metrics(incumbent_batches)
+            batches_won = sum(
+                challenger_batch["benchmark_raw_selection_fitness"]
+                > incumbent_batch["benchmark_raw_selection_fitness"]
+                for challenger_batch, incumbent_batch in zip(
+                    challenger_batches,
+                    incumbent_batches,
+                )
+            )
+            improvement = (
+                challenger_metrics["benchmark_raw_selection_fitness"]
+                - incumbent_metrics["benchmark_raw_selection_fitness"]
+            )
+            category_deltas = {
+                metric_name: (
+                    challenger_metrics[metric_name]
+                    - incumbent_metrics[metric_name]
+                )
+                for metric_name in CHECKPOINT_CATEGORY_METRICS
+                if metric_name in challenger_metrics
+                and metric_name in incumbent_metrics
+            }
+            regressed_categories = [
+                metric_name
+                for metric_name, delta in category_deltas.items()
+                if delta < -CHECKPOINT_CATEGORY_REGRESSION_TOLERANCE
+            ]
+            worst_category_delta = (
+                min(category_deltas.values())
+                if category_deltas
+                else None
+            )
+            category_gate_passed = not regressed_categories
+
+            bankruptcy_delta = None
+            bankruptcy_gate_passed = True
+            if (
+                "benchmark_bankruptcy_rate" in challenger_metrics
+                and "benchmark_bankruptcy_rate" in incumbent_metrics
+            ):
+                bankruptcy_delta = (
+                    challenger_metrics["benchmark_bankruptcy_rate"]
+                    - incumbent_metrics["benchmark_bankruptcy_rate"]
+                )
+                bankruptcy_gate_passed = (
+                    bankruptcy_delta
+                    <= CHECKPOINT_BANKRUPTCY_REGRESSION_TOLERANCE
+                )
+
+            unanimous_batches = batches_won == len(challenger_batches)
+            challenger_metrics["checkpoint_batches_won"] = batches_won
+            challenger_metrics["checkpoint_improvement"] = improvement
+            challenger_metrics["checkpoint_worst_category_delta"] = (
+                worst_category_delta
+            )
+            challenger_metrics["checkpoint_bankruptcy_delta"] = (
+                bankruptcy_delta
+            )
+            challenger_metrics["checkpoint_category_gate_passed"] = (
+                category_gate_passed
+            )
+            challenger_metrics["checkpoint_bankruptcy_gate_passed"] = (
+                bankruptcy_gate_passed
+            )
+            challenger_metrics["checkpoint_unanimous_batches"] = (
+                unanimous_batches
+            )
+            challenger_metrics["checkpoint_regressed_categories"] = (
+                tuple(regressed_categories)
+            )
+            challenger_metrics["checkpoint_accepted"] = (
+                unanimous_batches
+                and improvement >= CHECKPOINT_MINIMUM_IMPROVEMENT
+                and category_gate_passed
+                and bankruptcy_gate_passed
+            )
+            incumbent_metrics["checkpoint_batch_count"] = len(
+                incumbent_batches
             )
 
         return challenger_metrics, incumbent_metrics
@@ -1523,6 +2123,8 @@ class Trainer:
         stage=None,
         lineup_kind=None,
         full_tournament=False,
+        focal_agent=None,
+        return_metrics=False,
     ):
         if (
             isinstance(number_of_tournaments, bool)
@@ -1542,11 +2144,13 @@ class Trainer:
             "adaptive",
             "disciplined",
             "human",
+            "randomized_human",
             "risk_taker",
             "minimum",
         }:
             raise ValueError(
-                "lineup_kind must be adaptive, disciplined, human, risk_taker, minimum, or None"
+                "lineup_kind must be adaptive, disciplined, human, "
+                "randomized_human, risk_taker, minimum, or None"
             )
 
         if full_tournament and stage not in {
@@ -1558,6 +2162,10 @@ class Trainer:
             )
 
         total_fitness = 0.0
+        total_top_two_credit = 0.0
+        total_first_place_credit = 0.0
+        total_position = 0.0
+        bankruptcies = 0
         lineup_kinds = (
             "adaptive",
             "disciplined",
@@ -1575,6 +2183,7 @@ class Trainer:
                 self.create_fixed_benchmark_competitors(
                     network,
                     selected_lineup,
+                    focal_agent=focal_agent,
                 )
             )
 
@@ -1654,7 +2263,185 @@ class Trainer:
                 tie_end,
             )
 
-        return total_fitness / number_of_tournaments
+            total_top_two_credit += _placement_fitness_for_tie(
+                tie_start,
+                tie_end,
+                (1.0, 1.0),
+            )
+            total_first_place_credit += _placement_fitness_for_tie(
+                tie_start,
+                tie_end,
+                (1.0,),
+            )
+            total_position += (tie_start + tie_end + 1) / 2
+            bankruptcies += neural_bankroll <= 0
+
+        score = total_fitness / number_of_tournaments
+        if not return_metrics:
+            return score
+
+        return {
+            "score": score,
+            "top_two_rate": total_top_two_credit / number_of_tournaments,
+            "first_place_rate": (
+                total_first_place_credit / number_of_tournaments
+            ),
+            "average_position": total_position / number_of_tournaments,
+            "bankruptcy_rate": bankruptcies / number_of_tournaments,
+        }
+
+    def evaluate_advantage_over_minimum(
+        self,
+        network,
+        number_of_tournaments,
+        stage=None,
+        lineup_kind=None,
+        full_tournament=False,
+    ):
+        """Compare a network with minimum betting on one common batch."""
+        numpy_state = copy.deepcopy(
+            self.population.random_generator.bit_generator.state
+        )
+        python_state = random.getstate()
+
+        candidate_score = self.evaluate_network_against_fixed_benchmark(
+            network,
+            number_of_tournaments,
+            stage=stage,
+            lineup_kind=lineup_kind,
+            full_tournament=full_tournament,
+            return_metrics=True,
+        )
+
+        self.population.random_generator.bit_generator.state = (
+            copy.deepcopy(numpy_state)
+        )
+        random.setstate(python_state)
+        minimum_score = self.evaluate_network_against_fixed_benchmark(
+            network,
+            number_of_tournaments,
+            stage=stage,
+            lineup_kind=lineup_kind,
+            full_tournament=full_tournament,
+            focal_agent=BasicStrategyAgent(),
+            return_metrics=True,
+        )
+
+        def normalize_metrics(result):
+            if isinstance(result, dict):
+                return result
+            return {
+                "score": result,
+                "top_two_rate": result,
+                "first_place_rate": 0.0,
+                "average_position": 0.0,
+                "bankruptcy_rate": 0.0,
+            }
+
+        candidate_score = normalize_metrics(candidate_score)
+        minimum_score = normalize_metrics(minimum_score)
+
+        return {
+            "candidate_score": candidate_score["score"],
+            "minimum_score": minimum_score["score"],
+            "advantage": (
+                candidate_score["score"] - minimum_score["score"]
+            ),
+            "candidate_top_two_rate": candidate_score["top_two_rate"],
+            "minimum_top_two_rate": minimum_score["top_two_rate"],
+            "top_two_advantage": (
+                candidate_score["top_two_rate"]
+                - minimum_score["top_two_rate"]
+            ),
+            "candidate_first_place_rate": (
+                candidate_score["first_place_rate"]
+            ),
+            "candidate_average_position": (
+                candidate_score["average_position"]
+            ),
+            "candidate_bankruptcy_rate": (
+                candidate_score["bankruptcy_rate"]
+            ),
+        }
+
+    def _evaluate_one_training_baseline_tournament(
+        self,
+        network,
+        focal_agent=None,
+    ):
+        stage = self.select_training_stage()
+        table_kind = self.select_training_table_kind()
+        competitors = self.create_training_baseline_competitors(
+            network,
+            table_kind=table_kind,
+            focal_agent=focal_agent,
+        )
+        seat_order = self.population.random_generator.permutation(
+            len(competitors)
+        )
+        shuffled_competitors = [
+            competitors[int(index)]
+            for index in seat_order
+        ]
+        seat_names = [
+            strategy_name
+            for strategy_name, _ in shuffled_competitors
+        ]
+        neural_seat_index = seat_names.index("neural")
+        players, total_rounds, completed_rounds = (
+            self.create_tournament_scenario(
+                len(shuffled_competitors),
+                focal_seat=neural_seat_index,
+                stage=stage,
+            )
+        )
+        tournament = Tournament(
+            players=players,
+            bots=[bot for _, bot in shuffled_competitors],
+            number_of_rounds=total_rounds,
+            decks=self.decks,
+            minimum_bet=self.minimum_bet,
+            hit_soft_17=self.hit_soft_17,
+            max_hands=self.max_hands,
+        )
+        tournament.current_round_number = completed_rounds
+        starting_bankrolls = [player.bankroll for player in players]
+        rankings = tournament.play_tournament()
+        ranking_index = next(
+            index
+            for index, (seat_index, _) in enumerate(rankings)
+            if seat_index == neural_seat_index
+        )
+        neural_bankroll = rankings[ranking_index][1]
+        tie_start = ranking_index
+        while (
+            tie_start > 0
+            and rankings[tie_start - 1][1] == neural_bankroll
+        ):
+            tie_start -= 1
+        tie_end = ranking_index + 1
+        while (
+            tie_end < len(rankings)
+            and rankings[tie_end][1] == neural_bankroll
+        ):
+            tie_end += 1
+
+        score = training_placement_fitness_for_tie(
+            tie_start,
+            tie_end,
+        )
+        final_bankrolls = [0] * len(rankings)
+        for seat_index, bankroll in rankings:
+            final_bankrolls[seat_index] = bankroll
+        score += training_progress_fitness(
+            starting_bankrolls,
+            final_bankrolls,
+            neural_seat_index,
+            gap_closure_multiplier=(
+                self.gap_closure_multiplier_for_stage(stage)
+            ),
+        ) * self.training_shaping_multiplier()
+        return score
 
     def evaluate_network_against_baselines(
         self,
@@ -1701,137 +2488,22 @@ class Trainer:
         total_fitness = 0.0
 
         for _ in range(number_of_tournaments):
-            stage = self.select_training_stage()
-            table_kind = self.select_training_table_kind()
-
-            competitors = (
-                self.create_training_baseline_competitors(
-                    network,
-                    table_kind=table_kind,
-                )
+            numpy_state = copy.deepcopy(
+                self.population.random_generator.bit_generator.state
             )
-
-            seat_order = (
-                self.population.random_generator.permutation(
-                    len(competitors)
-                )
+            python_state = random.getstate()
+            candidate_score = (
+                self._evaluate_one_training_baseline_tournament(network)
             )
-
-            shuffled_competitors = [
-                competitors[int(index)]
-                for index in seat_order
-            ]
-
-            seat_names = [
-                strategy_name
-                for strategy_name, _ in (
-                    shuffled_competitors
-                )
-            ]
-
-            bots = [
-                bot
-                for _, bot in shuffled_competitors
-            ]
-
-            neural_seat_index = seat_names.index(
-                "neural"
+            self.population.random_generator.bit_generator.state = (
+                copy.deepcopy(numpy_state)
             )
-
-            players, total_rounds, completed_rounds = (
-                self.create_tournament_scenario(
-                    len(shuffled_competitors),
-                    focal_seat=neural_seat_index,
-                    stage=stage,
-                )
+            random.setstate(python_state)
+            minimum_score = self._evaluate_one_training_baseline_tournament(
+                network,
+                focal_agent=BasicStrategyAgent(),
             )
-
-            tournament = Tournament(
-                players=players,
-                bots=bots,
-                number_of_rounds=total_rounds,
-                decks=self.decks,
-                minimum_bet=self.minimum_bet,
-                hit_soft_17=self.hit_soft_17,
-                max_hands=self.max_hands,
-            )
-
-            tournament.current_round_number = (
-                completed_rounds
-            )
-
-            starting_bankrolls = [
-                player.bankroll
-                for player in players
-            ]
-
-            rankings = tournament.play_tournament()
-
-            neural_bankroll = None
-
-            for seat_index, bankroll in rankings:
-                if seat_index == neural_seat_index:
-                    neural_bankroll = bankroll
-                    break
-
-            if neural_bankroll is None:
-                raise RuntimeError(
-                    "Neural player was missing "
-                    "from tournament rankings"
-                )
-
-            neural_ranking_index = None
-
-            for ranking_index, (
-                seat_index,
-                bankroll,
-            ) in enumerate(rankings):
-                if seat_index == neural_seat_index:
-                    neural_ranking_index = (
-                        ranking_index
-                    )
-                    break
-
-            if neural_ranking_index is None:
-                raise RuntimeError(
-                    "Neural player was missing "
-                    "from tournament rankings"
-                )
-
-            neural_bankroll = rankings[
-                neural_ranking_index
-            ][1]
-
-            tie_start = neural_ranking_index
-
-            while (
-                tie_start > 0
-                and rankings[tie_start - 1][1]
-                == neural_bankroll
-            ):
-                tie_start -= 1
-
-            tie_end = neural_ranking_index + 1
-
-            while (
-                tie_end < len(rankings)
-                and rankings[tie_end][1]
-                == neural_bankroll
-            ):
-                tie_end += 1
-
-            total_fitness += advancement_fitness_for_tie(
-                tie_start,
-                tie_end,
-            )
-            final_bankrolls = [0] * len(rankings)
-            for seat_index, bankroll in rankings:
-                final_bankrolls[seat_index] = bankroll
-            total_fitness += training_progress_fitness(
-                starting_bankrolls,
-                final_bankrolls,
-                neural_seat_index,
-            ) * self.training_shaping_multiplier()
+            total_fitness += candidate_score - minimum_score
 
         self.population.add_fitness(
             network_index,

@@ -4,7 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from ml.betting_network import BETTING_ACTION_NAMES
+from ml.betting_network import (
+    BETTING_ACTION_NAMES,
+    LEGACY_BETTING_ACTION_NAMES,
+)
 from ml.training_metrics import save_training_history
 
 
@@ -222,8 +225,8 @@ def test_create_action_plot_writes_stacked_action_percentages_png(
             },
         }
         record["action_minimum"] = action_mix[0]
-        record["action_five_percent"] = action_mix[1]
-        record["action_controlled_recovery"] = action_mix[2]
+        record["action_bet_05_percent"] = action_mix[1]
+        record["action_bet_10_percent"] = action_mix[2]
         records.append(record)
 
     original_records = copy.deepcopy(records)
@@ -241,6 +244,95 @@ def test_create_action_plot_writes_stacked_action_percentages_png(
         b"\x89PNG\r\n\x1a\n"
     )
     assert records == original_records
+
+
+def test_create_action_plot_accepts_legacy_action_columns(
+    tmp_path,
+):
+    training_plots = importlib.import_module(
+        "ml.training_plots"
+    )
+    records = []
+    for generation in range(2):
+        records.append(
+            {
+                "generation": generation,
+                **{
+                    f"action_{action_name}": (
+                        1.0 / len(LEGACY_BETTING_ACTION_NAMES)
+                    )
+                    for action_name in LEGACY_BETTING_ACTION_NAMES
+                },
+            }
+        )
+
+    output_path = tmp_path / "legacy" / "actions.png"
+    returned_path = training_plots.create_action_plot(
+        records,
+        output_path,
+    )
+
+    assert returned_path == output_path
+    assert output_path.is_file()
+    assert output_path.read_bytes()[:8] == (
+        b"\x89PNG\r\n\x1a\n"
+    )
+
+
+def test_create_contextual_probe_plot_writes_actions_and_bets_png(
+    tmp_path,
+):
+    training_plots = importlib.import_module("ml.training_plots")
+    records = [
+        {
+            "generation": generation,
+            "probe_early_tied_action_index": generation + 1,
+            "probe_early_tied_legal_bet": 100 * (generation + 1),
+            "probe_late_safe_lead_action_index": 13 - generation,
+            "probe_late_safe_lead_legal_bet": 300 - generation * 100,
+        }
+        for generation in range(3)
+    ]
+    output_path = tmp_path / "plots" / "contextual_probes.png"
+
+    returned_path = training_plots.create_contextual_probe_plot(
+        records,
+        output_path,
+    )
+
+    assert returned_path == output_path
+    assert output_path.is_file()
+    assert output_path.stat().st_size > 1_000
+    assert output_path.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_create_advantage_plot_writes_minimum_relative_png(tmp_path):
+    training_plots = importlib.import_module("ml.training_plots")
+    records = []
+    for generation in range(3):
+        records.append(
+            {
+                "generation": generation,
+                "normal_advantage": -0.02 + generation * 0.02,
+                "mid_advantage": -0.01 + generation * 0.02,
+                "late_advantage": generation * 0.03,
+                "full_tournament_advantage": generation * 0.01,
+                "minimum_control_advantage": 0.0,
+                "randomized_human_advantage": generation * 0.02,
+                "robust_score": -0.01 + generation * 0.02,
+            }
+        )
+
+    output_path = tmp_path / "advantage.png"
+    returned_path = training_plots.create_advantage_plot(
+        records,
+        output_path,
+    )
+
+    assert returned_path == output_path
+    assert output_path.is_file()
+    assert output_path.stat().st_size > 1_000
+    assert output_path.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
 
 
 def test_generate_training_plots_loads_csv_and_writes_all_graphs(
@@ -290,11 +382,11 @@ def test_generate_training_plots_loads_csv_and_writes_all_graphs(
             },
         }
         record["action_minimum"] = 0.70 - generation * 0.10
-        record["action_five_percent"] = 0.20 + generation * 0.05
-        record["action_controlled_recovery"] = (
+        record["action_bet_05_percent"] = 0.20 + generation * 0.05
+        record["action_bet_10_percent"] = (
             1.0
             - record["action_minimum"]
-            - record["action_five_percent"]
+            - record["action_bet_05_percent"]
         )
         records.append(record)
 

@@ -115,6 +115,16 @@ def test_full_mutation_changes_parameters():
     assert all(changed_parameters)
 
 
+def test_action_head_uses_higher_mutation_rate_than_shared_layers():
+    network = BettingNetwork(seed=123)
+    original = network.clone()
+
+    network.mutate(mutation_rate=0.34, mutation_strength=0.1)
+
+    assert np.all(network.action_biases != original.action_biases)
+    assert np.any(network.weights1 == original.weights1)
+
+
 @pytest.mark.parametrize(
     "mutation_rate",
     [-0.01, 1.01, -1, 2],

@@ -4,7 +4,7 @@ import random
 import numpy as np
 
 from ml.betting_network import (
-    BETTING_ACTION_COUNT,
+    TRAINABLE_BETTING_ACTION_INDICES,
     BettingNetwork,
 )
 
@@ -148,7 +148,9 @@ class Population:
             + self.random_generator.uniform(-0.10, 0.10)
         )
         network.seed_preferred_action(
-            seed_index % BETTING_ACTION_COUNT
+            TRAINABLE_BETTING_ACTION_INDICES[
+                seed_index % len(TRAINABLE_BETTING_ACTION_INDICES)
+            ]
         )
         return network
 
@@ -176,10 +178,29 @@ class Population:
 
         return [int(index) for index in ranked_indices]
 
-    def create_next_generation(self):
-        sorted_indices = self.get_ranked_indices()
+    def create_next_generation(self, elite_indices=None):
+        if elite_indices is None:
+            sorted_indices = self.get_ranked_indices()
+            elite_indices = sorted_indices[:self.elite_count]
+        else:
+            elite_indices = list(elite_indices)
+            if len(elite_indices) != self.elite_count:
+                raise ValueError(
+                    "elite_indices must contain exactly elite_count indices"
+                )
+            if any(
+                isinstance(index, bool) or not isinstance(index, int)
+                for index in elite_indices
+            ):
+                raise TypeError("elite indices must be integers")
+            if len(set(elite_indices)) != len(elite_indices):
+                raise ValueError("elite indices must be unique")
+            if any(
+                index < 0 or index >= self.population_size
+                for index in elite_indices
+            ):
+                raise IndexError("elite index outside of bounds")
 
-        elite_indices = sorted_indices[:self.elite_count]
         next_networks = []
 
         for elite_index in elite_indices:
@@ -189,7 +210,7 @@ class Population:
         # Keep a small stream of strategy-seeded immigrants so the population
         # cannot permanently collapse into a single passive betting family.
         immigrant_count = min(
-            BETTING_ACTION_COUNT,
+            7,
             self.population_size - len(next_networks),
         )
         offspring_target = (
@@ -217,7 +238,7 @@ class Population:
             next_networks.append(
                 self._create_strategy_seeded_network(
                     self.generation_number
-                    * BETTING_ACTION_COUNT
+                    * immigrant_count
                     + immigrant_index
                 )
             )

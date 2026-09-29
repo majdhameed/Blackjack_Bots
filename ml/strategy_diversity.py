@@ -49,13 +49,27 @@ def measure_strategy_diversity(networks):
 
     unique_policy_rate = unique_policy_count / len(networks)
 
+    distinct_action_counts = [
+        len(set(signature))
+        for signature in policy_signatures
+    ]
+    mean_distinct_actions = (
+        sum(distinct_action_counts) / len(distinct_action_counts)
+    )
+    contextual_policy_rate = sum(
+        count > 1
+        for count in distinct_action_counts
+    ) / len(distinct_action_counts)
+
     return {
         "total_decisions": total_decisions,
         "action_counts": action_counts,
         "action_percentages": action_percentages,
         "action_entropy": action_entropy,
         "unique_policy_count": unique_policy_count,
-        "unique_policy_rate": unique_policy_rate
+        "unique_policy_rate": unique_policy_rate,
+        "mean_distinct_actions": mean_distinct_actions,
+        "contextual_policy_rate": contextual_policy_rate,
     }
         
 

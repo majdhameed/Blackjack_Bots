@@ -3,6 +3,7 @@ import pytest
 from blackjack.cards import Card
 from blackjack.player import Player
 from blackjack.player_hand import PlayerHand
+from tournament.power_chips import PowerChipAction
 
 
 def give_two_cards(player, hand_index=0):
@@ -282,3 +283,23 @@ def test_reset_round():
 
     assert player.hands == []
     assert player.active_hand_index == 0
+
+
+def test_player_defaults_to_no_power_chips():
+    player = Player(10_000)
+
+    assert player.power_chips.remaining() == 0
+
+
+def test_power_chips_survive_round_reset():
+    player = Player(
+        bankroll=10_000,
+        power_chip_count=2,
+    )
+
+    player.power_chips.consume(PowerChipAction.REPLACE)
+    player.place_bet(1_000, minimum_bet=100)
+    player.reset_round()
+
+    assert player.power_chips.remaining() == 1
+    assert player.hands == []

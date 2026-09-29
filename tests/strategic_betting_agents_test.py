@@ -201,6 +201,47 @@ def test_human_behavior_agent_reacts_to_a_loss_legally():
     assert bet % 100 == 0
 
 
+def test_human_behavior_agent_can_persist_in_rare_all_in_mode():
+    agent = HumanBehaviorAgent(
+        seed=123,
+        impulse_probability=0,
+        copy_probability=0,
+        protect_probability=0,
+        all_in_probability=1,
+        mode_persistence=3,
+    )
+    observation = make_observation()
+
+    first_bet = agent.choose_bet(observation)
+    second_bet = agent.choose_bet(observation)
+
+    assert first_bet == observation.bankroll
+    assert second_bet == observation.bankroll
+    assert agent.current_mode == "all_in"
+
+
+def test_human_behavior_agent_can_become_desperate_on_final_round():
+    agent = HumanBehaviorAgent(
+        seed=123,
+        protect_probability=0,
+        desperation_probability=1,
+    )
+    observation = replace(
+        make_observation(),
+        round_number=12,
+        rounds_remaining=0,
+        bankroll=8_000,
+        bankrolls=(12_000, 10_000, 9_500, 9_000, 8_500, 8_200, 8_000),
+        player_index=6,
+        round_player_index=6,
+    )
+
+    bet = agent.choose_bet(observation)
+
+    assert bet >= observation.bankroll * 0.50
+    assert agent.current_mode == "desperate"
+
+
 def test_lead_protector_covers_a_visible_winning_bet():
     agent = LeadProtectionAgent()
 
@@ -422,6 +463,30 @@ def test_risk_taker_benchmark_has_half_and_all_in_leaders():
     assert "half_bankroll_leader_1" in strategy_names
     assert "half_bankroll_leader_2" in strategy_names
     assert "opening_all_in_leader" in strategy_names
+
+
+def test_randomized_human_holdout_samples_six_personalities():
+    trainer = make_trainer()
+    competitors = trainer.create_fixed_benchmark_competitors(
+        trainer.population.networks[0],
+        "randomized_human",
+    )
+    opponents = [agent for name, agent in competitors if name != "neural"]
+
+    assert len(opponents) == 6
+    human_opponents = [
+        agent
+        for agent in opponents
+        if isinstance(agent, HumanBehaviorAgent)
+    ]
+    assert len(human_opponents) == 3
+    assert len({agent.maximum_fraction for agent in human_opponents}) > 1
+    assert len({agent.all_in_probability for agent in human_opponents}) > 1
+    assert {name for name, _ in competitors} >= {
+        "minimum_control",
+        "balanced_chaser",
+        "lead_protector",
+    }
 
 
 def test_extreme_strategies_are_isolated_to_extreme_tables():

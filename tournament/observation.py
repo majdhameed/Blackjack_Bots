@@ -31,6 +31,12 @@ class BettingObservation:
     previous_result: float = 0.0
     consecutive_losses: int = 0
     has_previous_round: bool = False
+    largest_opponent_previous_bet_fraction: float = 0.0
+    average_opponent_previous_bet_fraction: float = 0.0
+    opponents_over_ten_percent: int = 0
+    opponents_over_twenty_five_percent: int = 0
+    opponent_bet_volatility: float = 0.0
+    opponents_with_loss_streak: int = 0
 
 # State available while a player is selecting a blackjack action.
 @dataclass(frozen=True)

@@ -8,15 +8,25 @@ INTEGER_FIELDS = {
     "league_size",
     "total_probe_decisions",
     "unique_policy_count",
+    "checkpoint_batches_won",
+    "checkpoint_batch_count",
+    "benchmark_safe_parent_count",
+    "benchmark_balanced_parent_count",
+    "benchmark_aggressive_parent_count",
+    "self_play_fallback_parent_count",
 }
 
 BOOLEAN_FIELDS = {
     "checkpoint_saved",
     "league_promoted",
+    "checkpoint_category_gate_passed",
+    "checkpoint_bankruptcy_gate_passed",
+    "checkpoint_unanimous_batches",
 }
 
 def build_generation_record(generation_result, verified_score=None, checkpoint_saved=False):
     strategy_diversity = generation_result["strategy_diversity"]
+    parent_styles = generation_result.get("benchmark_parent_styles", [])
 
     
     record = {
@@ -32,21 +42,110 @@ def build_generation_record(generation_result, verified_score=None, checkpoint_s
         "late_score": generation_result["benchmark_late_fitness"],
         "full_tournament_score": generation_result["benchmark_holdout_fitness"],
         "minimum_control_score": generation_result["benchmark_minimum_holdout_fitness"],
+        "randomized_human_score": generation_result.get(
+            "benchmark_human_holdout_fitness"
+        ),
+        "raw_selection_score": generation_result.get(
+            "benchmark_raw_selection_fitness"
+        ),
+        "advantage_score": generation_result.get(
+            "benchmark_advantage_fitness"
+        ),
+        "normal_advantage": generation_result.get(
+            "benchmark_normal_advantage"
+        ),
+        "mid_advantage": generation_result.get(
+            "benchmark_mid_advantage"
+        ),
+        "late_advantage": generation_result.get(
+            "benchmark_late_advantage"
+        ),
+        "full_tournament_advantage": generation_result.get(
+            "benchmark_holdout_advantage"
+        ),
+        "minimum_control_advantage": generation_result.get(
+            "benchmark_minimum_holdout_advantage"
+        ),
+        "randomized_human_advantage": generation_result.get(
+            "benchmark_human_holdout_advantage"
+        ),
         "robust_score": generation_result["benchmark_selection_fitness"],
         "verified_score": verified_score,
+        "verified_top_two_rate": generation_result.get(
+            "benchmark_top_two_rate"
+        ),
+        "verified_first_place_rate": generation_result.get(
+            "benchmark_first_place_rate"
+        ),
+        "verified_average_position": generation_result.get(
+            "benchmark_average_position"
+        ),
+        "verified_bankruptcy_rate": generation_result.get(
+            "benchmark_bankruptcy_rate"
+        ),
         "checkpoint_saved": checkpoint_saved,
+        "checkpoint_batches_won": generation_result.get(
+            "checkpoint_batches_won"
+        ),
+        "checkpoint_batch_count": generation_result.get(
+            "checkpoint_batch_count"
+        ),
+        "checkpoint_improvement": generation_result.get(
+            "checkpoint_improvement"
+        ),
+        "checkpoint_worst_category_delta": generation_result.get(
+            "checkpoint_worst_category_delta"
+        ),
+        "checkpoint_bankruptcy_delta": generation_result.get(
+            "checkpoint_bankruptcy_delta"
+        ),
+        "checkpoint_category_gate_passed": generation_result.get(
+            "checkpoint_category_gate_passed"
+        ),
+        "checkpoint_bankruptcy_gate_passed": generation_result.get(
+            "checkpoint_bankruptcy_gate_passed"
+        ),
+        "checkpoint_unanimous_batches": generation_result.get(
+            "checkpoint_unanimous_batches"
+        ),
         "league_promoted": generation_result["league_promoted"],
         "league_size": generation_result["league_size"],
+        "benchmark_safe_parent_count": parent_styles.count("safe"),
+        "benchmark_balanced_parent_count": parent_styles.count("balanced"),
+        "benchmark_aggressive_parent_count": parent_styles.count(
+            "aggressive"
+        ),
+        "self_play_fallback_parent_count": parent_styles.count(
+            "self_play_fallback"
+        ),
         "total_probe_decisions": strategy_diversity["total_decisions"],
         "action_entropy": strategy_diversity["action_entropy"],
         "unique_policy_count": strategy_diversity["unique_policy_count"],
         "unique_policy_rate": strategy_diversity["unique_policy_rate"],
+        "mean_distinct_actions": strategy_diversity.get(
+            "mean_distinct_actions",
+            1.0,
+        ),
+        "contextual_policy_rate": strategy_diversity.get(
+            "contextual_policy_rate",
+            0.0,
+        ),
     }
 
     for action in BETTING_ACTION_NAMES:
         name = f"action_{action}"
         value = strategy_diversity["action_percentages"][action]
         record[name] = value
+
+    for probe_slug, probe_result in generation_result.get(
+        "contextual_probe_results",
+        {},
+    ).items():
+        prefix = f"probe_{probe_slug}"
+        record[f"{prefix}_action_index"] = probe_result[
+            "action_index"
+        ]
+        record[f"{prefix}_legal_bet"] = probe_result["legal_bet"]
 
     return record
 
@@ -96,7 +195,11 @@ def load_training_history(input_path):
 
                 if raw_value == "":
                     value = None
-                elif header in INTEGER_FIELDS:
+                elif (
+                    header in INTEGER_FIELDS
+                    or header.endswith("_action_index")
+                    or header.endswith("_legal_bet")
+                ):
                     value = int(raw_value)
                 elif header in BOOLEAN_FIELDS:
                     if raw_value not in {"True", "False"}:

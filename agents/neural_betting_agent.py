@@ -1,13 +1,5 @@
 from agents.basic_strategy_agent import BasicStrategyAgent
-from agents.betting_strategy_helpers import (
-    active_opponent_bankrolls,
-    legal_bet,
-    top_two_cutoff,
-)
-from agents.controlled_lead_martingale_agent import (
-    ControlledLeadMartingaleAgent,
-)
-from agents.lead_protection_agent import LeadProtectionAgent
+from agents.betting_strategy_helpers import legal_bet
 from ml.betting_encoder import encode_betting_observation
 from ml.betting_network import BETTING_ACTION_NAMES
 from tournament.observation import BettingObservation
@@ -53,52 +45,9 @@ class NeuralBettingAgent(BasicStrategyAgent):
             return bankroll * self.network.forward(features)
         if action_name == "minimum":
             return observation.minimum_bet
-        if action_name == "five_percent":
-            return bankroll * 0.05
-        if action_name == "controlled_recovery":
-            return ControlledLeadMartingaleAgent().choose_bet(
-                observation
-            )
-        if action_name == "take_second":
-            deficit = max(
-                0,
-                top_two_cutoff(observation) - bankroll,
-            )
-            return observation.minimum_bet + deficit
-        if action_name == "take_first":
-            opponents = active_opponent_bankrolls(observation)
-            deficit = max(
-                0,
-                max(opponents, default=bankroll) - bankroll,
-            )
-            return observation.minimum_bet + deficit
-        if action_name == "cover_visible_bets":
-            largest_winning_bankroll = max(
-                (
-                    opponent_bankroll
-                    + 2 * observation.current_bets[index]
-                    for index, opponent_bankroll in enumerate(
-                        observation.bankrolls
-                    )
-                    if (
-                        index != observation.player_index
-                        and observation.active_players[index]
-                        and observation.bets_placed[index]
-                    )
-                ),
-                default=bankroll,
-            )
-            return max(
-                observation.minimum_bet,
-                largest_winning_bankroll - bankroll
-                + observation.minimum_bet,
-            )
-        if action_name == "half_bankroll":
-            return bankroll * 0.50
-        if action_name == "all_in":
-            return bankroll
-        if action_name == "protect_lead":
-            return LeadProtectionAgent().choose_bet(observation)
+        if action_name.startswith("bet_") and action_name.endswith("_percent"):
+            percentage = int(action_name.split("_")[1])
+            return bankroll * percentage / 100
 
         raise ValueError(f"Unknown betting action: {action_name}")
 
