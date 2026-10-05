@@ -8,6 +8,13 @@ from blackjack.dealer import Dealer
 from blackjack.player import Player
 from blackjack.card_counter import CardCounter
 
+from tournament.power_chips import (
+    PowerChipAction,
+    apply_power_chip_from_shoe,
+    legal_power_chip_targets,
+)
+
+
 class TableRound:
     def __init__(self, players, shoe, minimum_bet, starting_player, hit_soft_17, max_hands, card_counter):
 
@@ -67,6 +74,7 @@ class TableRound:
 
         self.outcomes = [[] for _ in range(len(players))]
         self.card_counter = card_counter
+        self.pending_rehit = None
 
     def get_player(self, player_index):
         if not isinstance(player_index, int):
@@ -328,6 +336,9 @@ class TableRound:
         if self.dealer_turn_complete:
             return set()
 
+        if self.pending_rehit is not None:
+            return set()
+
         player = self.get_player(player_index)
         player_hand = player.get_hand(hand_index)
 
@@ -428,7 +439,10 @@ class TableRound:
         player.add_card(hand_index, card)
         self.card_counter.record_card(card)
 
-        self.advance_action_turn()
+        if player.power_chips.can_use(PowerChipAction.REHIT):
+            self.pending_rehit = [player_index, hand_index]
+        else:
+            self.advance_action_turn()
 
         return card
 
@@ -515,6 +529,70 @@ class TableRound:
         player = self.get_player(player_index)
 
         player.surrender(hand_index)
+        self.advance_action_turn()
+
+    def player_use_power_chip(
+        self,
+        player_index,
+        hand_index,
+        action,
+        target_index,
+    ):
+        if self.is_over:
+            raise ValueError("Round is already over")
+        if not self.naturals_checked:
+            raise ValueError("Naturals have not been checked yet")
+        if self.dealer_turn_complete:
+            raise ValueError("Dealer turn is already over")
+        if player_index != self.get_current_player_index():
+            raise ValueError("Not the current player's turn")
+
+        if (
+            action == PowerChipAction.REHIT
+            and self.pending_rehit != [player_index, hand_index]
+        ):
+            raise ValueError("There is no pending rehit for this hand")
+        player = self.get_player(player_index)
+        player_hand = player.get_hand(hand_index)
+
+        legal_targets = self.get_legal_power_chip_targets(
+            player_index,
+            hand_index,
+            action,
+        )
+
+        if target_index not in legal_targets:
+            raise ValueError("Not legal card to use power chip on")
+
+        removed_card = apply_power_chip_from_shoe(
+            hand=player_hand.hand,
+            action=action,
+            target_index=target_index,
+            shoe=self.shoe,
+            dealt_card_count=2,
+            dealer_blackjack_checked=self.naturals_checked,
+            inventory=player.power_chips,
+        )
+
+        replacement_card = player_hand.hand.cards[target_index]
+
+        if action == PowerChipAction.REHIT:
+            if player.power_chips.can_use(PowerChipAction.REHIT):
+                self.pending_rehit = [player_index, hand_index]
+            else:
+                self.pending_rehit = None
+                self.advance_action_turn()
+
+        self.card_counter.record_card(replacement_card)
+
+        return removed_card
+
+    def player_decline_rehit(self, player_index, hand_index):
+        if [player_index, hand_index] != self.pending_rehit:
+            raise ValueError("Player and hand do not match the pending rehit")
+
+        self.pending_rehit = None
+
         self.advance_action_turn()
 
     def has_playable_hand(self):
@@ -645,3 +723,49 @@ class TableRound:
 
 
 
+    def get_legal_power_chip_targets(
+        self,
+        player_index,
+        hand_index,
+        action,
+    ):
+        if self.is_over:
+            return ()
+
+        if not self.naturals_checked:
+            return ()
+
+        if self.dealer_turn_complete:
+            return ()
+
+        if player_index != self.get_current_player_index():
+            return ()
+
+        if (
+            action == PowerChipAction.REHIT
+            and self.pending_rehit != [player_index, hand_index]
+        ):
+            return ()
+
+        player = self.get_player(player_index)
+        player_hand = player.get_hand(hand_index)
+
+        targets = legal_power_chip_targets(
+            action=action,
+            card_count=len(player_hand.hand.cards),
+            dealt_card_count=2,
+            dealer_blackjack_checked=self.naturals_checked,
+            inventory=player.power_chips,
+        )
+
+        if (
+            action == PowerChipAction.REPLACE
+            and player_hand.came_from_split
+        ):
+            targets = tuple(
+                target
+                for target in targets
+                if target == 1
+            )
+
+        return targets

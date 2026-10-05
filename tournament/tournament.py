@@ -6,8 +6,9 @@ import math
 from blackjack.actions import Action
 from blackjack.cards import Shoe
 from blackjack.player import Player
+from tournament.power_chips import PowerChipAction
 from tournament.table_round import TableRound
-from tournament.observation import BettingObservation, ActionObservation
+from tournament.observation import BettingObservation, ActionObservation, PowerChipObservation
 from blackjack.card_counter import CardCounter
 
 
@@ -240,6 +241,37 @@ class Tournament:
             if round_player_index is None:
                 break
 
+            if self.current_table_round.pending_rehit is not None:
+                pending_player_index, pending_hand_index = (
+                    self.current_table_round.pending_rehit
+                )
+
+                pending_bot = self.get_bot_for_round_player(pending_player_index)
+
+                rehit_observation = self.build_power_chip_observation(
+                    pending_player_index,
+                    pending_hand_index,
+                    PowerChipAction.REHIT,
+                )
+
+                target = pending_bot.choose_power_chip(rehit_observation)
+
+                if target is None:
+                    self.current_table_round.player_decline_rehit(
+                        pending_player_index,
+                        pending_hand_index,
+                    )
+                else:
+                    self.current_table_round.player_use_power_chip(
+                        pending_player_index,
+                        pending_hand_index,
+                        PowerChipAction.REHIT,
+                        target,
+                    )
+
+                continue
+
+
             hand_index = self.get_active_hand_index(round_player_index)
 
             if hand_index is None:
@@ -251,6 +283,34 @@ class Tournament:
             player_hand = player.get_hand(hand_index)
 
             bot = self.get_bot_for_round_player(round_player_index)
+
+            legal_replace_targets = (
+                self.current_table_round.get_legal_power_chip_targets(
+                    round_player_index,
+                    hand_index,
+                    PowerChipAction.REPLACE,
+                )
+            )
+
+            if len(legal_replace_targets) != 0:
+                replace_observation = self.build_power_chip_observation(
+                    round_player_index,
+                    hand_index,
+                    PowerChipAction.REPLACE,
+                )
+
+                target = bot.choose_power_chip(replace_observation)
+
+                if target is not None:
+                    self.current_table_round.player_use_power_chip(
+                        round_player_index,
+                        hand_index,
+                        PowerChipAction.REPLACE,
+                        target,
+                    )
+                    continue
+
+
 
             legal_actions = self.current_table_round.get_legal_actions(round_player_index, hand_index)
 
@@ -276,7 +336,7 @@ class Tournament:
 
 
     def finish_current_round(self):
-        # Run the dealer and settlement phases, then archive the completed round.
+        # Run the dealer and settlement phases, then archive the completed round
         if self.current_table_round is None:
             raise ValueError("The current round does not exist")
 
@@ -648,3 +708,67 @@ class Tournament:
                 shoe_penetration
             ),
         }
+
+    def build_power_chip_observation(self, round_player_index, hand_index, action):
+        table_round = self.current_table_round
+
+        if not table_round:
+            raise ValueError("No table round exists")
+
+        current_player_index = table_round.get_current_player_index()
+
+        if round_player_index != current_player_index:
+            raise ValueError("It is not this player's turn")
+
+        legal_targets = table_round.get_legal_power_chip_targets(
+            round_player_index,
+            hand_index,
+            action,
+        )
+
+        if not legal_targets:
+            raise ValueError("No legal power chip targets")
+
+        permanent_player_index = self.active_player_indices[round_player_index]
+
+        player = table_round.get_player(round_player_index)
+
+        player_hand = player.get_hand(hand_index)
+
+        bankrolls = tuple(player.bankroll for player in self.players)
+
+        power_chips = tuple(player.power_chips.remaining() for player in self.players)
+
+        current_bet = player_hand.bet
+
+        hand_total = player_hand.hand.get_total()
+
+        hand_is_soft = player_hand.hand.is_soft()
+
+        hand_card_values = tuple(
+            card.get_value()
+            for card in player_hand.hand.cards
+        )
+
+        dealer_upcard_value = table_round.dealer.hand.cards[0].get_value()
+
+        return PowerChipObservation(
+            round_number=self.current_round_number,
+            total_rounds=self.number_of_rounds,
+            rounds_remaining=(
+                self.number_of_rounds - self.current_round_number
+            ),
+            player_index=permanent_player_index,
+            round_player_index=round_player_index,
+            hand_index=hand_index,
+            bankroll=self.players[permanent_player_index].bankroll,
+            bankrolls=bankrolls,
+            current_bet=current_bet,
+            hand_total=hand_total,
+            hand_is_soft=hand_is_soft,
+            hand_card_values=hand_card_values,
+            dealer_upcard_value=dealer_upcard_value,
+            power_chip_counts=power_chips,
+            action=action,
+            legal_targets=legal_targets,
+        )

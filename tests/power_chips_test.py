@@ -34,6 +34,27 @@ def test_power_chip_inventory_tracks_usage():
         inventory.consume(PowerChipAction.REHIT)
 
 
+@pytest.mark.parametrize("chip_count", [-1, -5])
+def test_power_chip_inventory_rejects_negative_counts(chip_count):
+    with pytest.raises(ValueError, match="negative"):
+        PowerChipInventory(chip_count)
+
+
+@pytest.mark.parametrize("chip_count", [True, 1.5, "1"])
+def test_power_chip_inventory_requires_an_integer_count(chip_count):
+    with pytest.raises(TypeError, match="integer"):
+        PowerChipInventory(chip_count)
+
+
+def test_power_chip_inventory_rejects_unknown_actions():
+    inventory = PowerChipInventory(1)
+
+    with pytest.raises(TypeError, match="action"):
+        inventory.can_use("REHIT")
+
+    assert inventory.remaining() == 1
+
+
 def test_legal_targets_change_after_dealer_check_and_hit():
     inventory = PowerChipInventory(chip_count=1)
     common_state = {

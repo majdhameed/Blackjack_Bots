@@ -138,6 +138,7 @@ def create_trainer(
     max_hands,
     randomize_training_rounds=False,
     league_directory=None,
+    power_chip_count=0,
 ):
     trainer = Trainer(
         population,
@@ -149,6 +150,7 @@ def create_trainer(
         max_hands,
         randomize_training_rounds,
         league_directory=league_directory,
+        power_chip_count=power_chip_count,
     )
     return trainer
 
@@ -761,6 +763,13 @@ def parse_arguments(arguments=None):
         default=250,
         help="Number of additional generations to train (default: 250).",
     )
+
+    parser.add_argument(
+        "--power-chip-count",
+        type=int,
+        default=0,
+        help="Number of power chips each player starts with (default: 0).",
+    )
     return parser.parse_args(arguments)
 
 
@@ -808,6 +817,7 @@ def main(arguments=None):
         max_hands=4,
         randomize_training_rounds=True,
         league_directory=league_directory,
+        power_chip_count=args.power_chip_count,
     )
     summary = run_training(
         trainer=trainer,

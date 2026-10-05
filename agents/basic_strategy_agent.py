@@ -10,7 +10,7 @@ from blackjack.basic_strategy import (
 
 from blackjack.cards import Card
 from blackjack.hand import Hand
-from tournament.observation import BettingObservation, ActionObservation
+from tournament.observation import BettingObservation, ActionObservation, PowerChipObservation
 
 
 class BasicStrategyAgent:
@@ -54,40 +54,65 @@ class BasicStrategyAgent:
                 Card(rank, "Hearts")
             )
 
-            dealer_value = (
-                observation.dealer_upcard_value
+        dealer_value = (
+            observation.dealer_upcard_value
+        )
+
+        if dealer_value == 11:
+            dealer_rank = "A"
+        else:
+            dealer_rank = dealer_value
+
+        # Suit has no strategic effect; Hearts is a harmless placeholder.
+        dealer_upcard = Card(
+            dealer_rank,
+            "Hearts",
+        )
+
+        action = choose_basic_strategy_action(
+            hand=reconstructed_hand,
+            dealer_upcard=dealer_upcard,
+            can_double=(
+                Action.DOUBLE in legal_actions
+            ),
+            can_split=(
+                Action.SPLIT in legal_actions
+            ),
+            can_surrender=(
+                Action.SURRENDER in legal_actions
+            ),
+            hit_soft_17=observation.hit_soft_17,
+        )
+
+        if action not in legal_actions:
+            raise ValueError(
+                "Basic strategy returned an "
+                f"illegal action: {action}"
             )
 
-            if dealer_value == 11:
-                dealer_rank = "A"
-            else:
-                dealer_rank = dealer_value
+        return action
 
-            # Suit has no strategic effect; Hearts is a harmless placeholder.
-            dealer_upcard = Card(
-                dealer_rank,
-                "Hearts",
-            )
+    def choose_power_chip(self, observation: PowerChipObservation):
+        if not isinstance(observation, PowerChipObservation):
+            raise TypeError("wrong observation type")
 
-            action = choose_basic_strategy_action(
-                hand=reconstructed_hand,
-                dealer_upcard=dealer_upcard,
-                can_double=(
-                    Action.DOUBLE in legal_actions
-                ),
-                can_split=(
-                    Action.SPLIT in legal_actions
-                ),
-                can_surrender=(
-                    Action.SURRENDER in legal_actions
-                ),
-                hit_soft_17=observation.hit_soft_17,
-            )
+        policy = getattr(self, "power_chip_policy", None)
 
-            if action not in legal_actions:
-                raise ValueError(
-                    "Basic strategy returned an "
-                    f"illegal action: {action}"
-                )
+        if policy is None:
+            return None
 
-            return action
+        chooser = getattr(policy, "choose_power_chip", None)
+        if not callable(chooser):
+            raise TypeError("Invalid policy type")
+
+        return chooser(observation)
+
+    def set_power_chip_policy(self, policy):
+        chooser = getattr(policy, "choose_power_chip", None)
+
+        if not callable(chooser):
+            raise TypeError ("Invalid chooser")
+
+        self.power_chip_policy = policy
+
+        return self

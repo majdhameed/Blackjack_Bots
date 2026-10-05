@@ -13,6 +13,10 @@ PARAMETER_NAMES = (
     "biases3",
     "action_weights",
     "action_biases",
+    "power_chip_hidden_weights",
+    "power_chip_hidden_biases",
+    "power_chip_output_weights",
+    "power_chip_output_biases",
 )
 
 

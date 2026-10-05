@@ -35,6 +35,14 @@ from ml.strategy_diversity import (
 )
 from ml.betting_probes import evaluate_contextual_training_probes
 
+from agents.power_chip_policies import (
+    BustSavingPowerChipPolicy,
+    StiffHandReplacementPowerChipPolicy,
+    HighStakesPowerChipPolicy,
+    LateRoundPowerChipPolicy,
+    CompositePowerChipPolicy,
+)
+
 
 FIRST_PLACE_FITNESS = 1.05
 SECOND_PLACE_FITNESS = 1.0
@@ -240,6 +248,7 @@ class Trainer:
         randomize_training_rounds=False,
         league_directory=None,
         maximum_league_size=8,
+        power_chip_count=0,
     ):
         self.population = population
         self.starting_bankroll = starting_bankroll
@@ -262,6 +271,8 @@ class Trainer:
         self.champion_league = []
         self.league_best_score = float("-inf")
         self._load_champion_league()
+
+        self.power_chip_count = power_chip_count
 
     def _load_champion_league(self):
         if (
@@ -417,13 +428,19 @@ class Trainer:
         competitors = [("neural", focal_agent)]
 
         if table_kind == "minimum":
-            competitors.extend(
-                (
-                    f"minimum_{index}",
-                    BasicStrategyAgent(),
+            for index in range(1, 7):
+                if self.power_chip_count > 0:
+                    policy = self.create_value_aware_power_chip_policy()
+                    agent = BasicStrategyAgent()
+                    agent.set_power_chip_policy(policy)
+                else:
+                    agent = BasicStrategyAgent()
+                competitors.append(
+                    (
+                        f"minimum_{index}",
+                        agent,
+                    )
                 )
-                for index in range(1, 7)
-            )
             return competitors
 
         if table_kind == "league":
@@ -486,7 +503,12 @@ class Trainer:
             for name, factory in league_fillers:
                 if len(competitors) == 7:
                     break
-                competitors.append((name, factory()))
+                agent = factory()
+
+                if self.power_chip_count > 0 and hasattr(agent, "set_power_chip_policy"):
+                    policy = self.create_value_aware_power_chip_policy()
+                    agent.set_power_chip_policy(policy)
+                competitors.append((name, agent))
             return competitors
 
         if table_kind == "adaptive":
@@ -592,15 +614,16 @@ class Trainer:
                 ),
             ]
 
-        competitors.extend(
-            (
-                strategy_name,
-                agent_factory(),
-            )
-            for strategy_name, agent_factory in (
-                opponent_factories
-            )
-        )
+        for strategy_name, agent_factory in opponent_factories:
+            agent = agent_factory()
+
+            if self.power_chip_count > 0:
+                policy = self.create_value_aware_power_chip_policy()
+                agent.set_power_chip_policy(policy)
+
+            competitors.append((strategy_name, agent))
+
+            
 
         return competitors
 
@@ -793,6 +816,12 @@ class Trainer:
                 "randomized_human, risk_taker, or minimum"
             )
 
+        if self.power_chip_count > 0:
+            for strategy_name, agent in opponents:
+                policy = self.create_value_aware_power_chip_policy()
+                if hasattr(agent, "set_power_chip_policy"):
+                    agent.set_power_chip_policy(policy)
+
         competitors.extend(opponents)
         return competitors
 
@@ -842,7 +871,7 @@ class Trainer:
         if stage == "normal":
             return (
                 [
-                    Player(self.starting_bankroll)
+                    Player(self.starting_bankroll, self.power_chip_count)
                     for _ in range(player_count)
                 ],
                 self.training_round_count(),
@@ -1014,7 +1043,7 @@ class Trainer:
                 )
 
         players = [
-            Player(max(self.minimum_bet, int(bankroll)))
+            Player(max(self.minimum_bet, int(bankroll)), self.power_chip_count)
             for bankroll in bankrolls
         ]
 
@@ -2530,3 +2559,20 @@ class Trainer:
             baseline_scores.append(score)
 
         return baseline_scores
+
+    def create_value_aware_power_chip_policy(self):
+        tactical_policy = CompositePowerChipPolicy(
+            [BustSavingPowerChipPolicy(),
+            StiffHandReplacementPowerChipPolicy()],
+        )
+        high_stakes_policy = HighStakesPowerChipPolicy(tactical_policy, .10)
+
+        late_round_policy = LateRoundPowerChipPolicy(tactical_policy, 2)
+
+        final_policy = CompositePowerChipPolicy(
+            [high_stakes_policy,
+            late_round_policy,
+            ]
+        )
+
+        return final_policy

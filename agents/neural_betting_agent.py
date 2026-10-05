@@ -2,7 +2,8 @@ from agents.basic_strategy_agent import BasicStrategyAgent
 from agents.betting_strategy_helpers import legal_bet
 from ml.betting_encoder import encode_betting_observation
 from ml.betting_network import BETTING_ACTION_NAMES
-from tournament.observation import BettingObservation
+from ml.power_chip_encoder import encode_power_chip_observation
+from tournament.observation import BettingObservation, PowerChipObservation
 
 
 class NeuralBettingAgent(BasicStrategyAgent):
@@ -78,3 +79,42 @@ class NeuralBettingAgent(BasicStrategyAgent):
             betting_observation,
             requested_bet,
         )
+
+    def choose_power_chip(self, power_chip_observation):
+        if not isinstance(
+            power_chip_observation,
+            PowerChipObservation,
+        ):
+            raise TypeError(
+                "observation must be a BettingObservation"
+            )
+
+        features = encode_power_chip_observation(
+            power_chip_observation
+        )
+
+        if not callable(getattr(self.network, "power_chip_scores", None)):
+            raise ValueError(
+                "network does not support choosing a power chip"
+            )
+
+        scores = self.network.power_chip_scores(features)
+
+        valid_choices = [0]
+
+
+        for target_position in range(
+            min(len(power_chip_observation.legal_targets), 2)
+        ):
+            valid_choices.append(target_position + 1)
+
+        selected_choice = max(
+            valid_choices,
+            key=lambda choice: scores[choice],
+        )
+
+        if selected_choice == 0:
+            return None
+
+        return power_chip_observation.legal_targets[selected_choice - 1]
+                

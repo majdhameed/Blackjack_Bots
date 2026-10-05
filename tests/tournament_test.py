@@ -1,7 +1,10 @@
 from blackjack.actions import Action
 import pytest
 from agents.all_in_agent import AllInAgent
+from agents.neural_betting_agent import NeuralBettingAgent
+from blackjack.cards import Card
 from blackjack.player import Player
+from tournament.power_chips import PowerChipAction
 from tournament.tournament import Tournament
 
 
@@ -28,13 +31,64 @@ class StandBot:
         )
 
 
+class HitThenDeclineRehitBot(StandBot):
+    def __init__(self):
+        self.power_chip_observations = []
+
+    def choose_action(self, action_observation):
+        if len(action_observation.hand_card_values) == 2:
+            return Action.HIT
+
+        return Action.STAND
+
+    def choose_power_chip(self, power_chip_observation):
+        self.power_chip_observations.append(power_chip_observation)
+        return None
+
+
+class HitThenUseRehitBot(HitThenDeclineRehitBot):
+    def choose_power_chip(self, power_chip_observation):
+        self.power_chip_observations.append(power_chip_observation)
+
+        if power_chip_observation.action is PowerChipAction.REPLACE:
+            return None
+
+        return power_chip_observation.legal_targets[0]
+
+
+class ReplaceSecondCardThenStandBot(StandBot):
+    def __init__(self):
+        self.power_chip_observations = []
+
+    def choose_power_chip(self, power_chip_observation):
+        self.power_chip_observations.append(power_chip_observation)
+        return 1
+
+
+class ForcedSecondTargetPowerChipNetwork:
+    def forward(self, features):
+        return 0.01
+
+    def power_chip_scores(self, features):
+        return [0.0, 0.0, 1.0]
+
+
+class NeuralPowerChipThenStandAgent(NeuralBettingAgent):
+    def choose_action(self, action_observation):
+        return Action.STAND
+
+
 def make_tournament(
     number_of_rounds=1,
     player_count=3,
+    power_chip_counts=None,
 ):
+    if power_chip_counts is None:
+        power_chip_counts = [0] * player_count
+
     players = [
-        Player(10_000)
-        for _ in range(player_count)
+        Player(10_000, power_chip_count=power_chip_counts[player_index])
+        for player_index in range(player_count)
     ]
 
     bots = [
@@ -53,6 +107,201 @@ def make_tournament(
     )
 
     return tournament
+
+
+def test_build_power_chip_observation_for_pending_rehit():
+    tournament = make_tournament(
+        player_count=2,
+        power_chip_counts=[2, 1],
+    )
+    tournament.start_next_round()
+    tournament.place_round_bets()
+
+    deal_order = [
+        Card(8, "Hearts"),
+        Card(9, "Clubs"),
+        Card(10, "Diamonds"),
+        Card(7, "Spades"),
+        Card(8, "Diamonds"),
+        Card(6, "Clubs"),
+        Card(2, "Hearts"),
+    ]
+    tournament.shoe.cards = list(reversed(deal_order))
+    tournament.begin_player_actions()
+    tournament.current_table_round.player_hit(0, 0)
+
+    observation = tournament.build_power_chip_observation(
+        round_player_index=0,
+        hand_index=0,
+        action=PowerChipAction.REHIT,
+    )
+
+    assert observation.round_number == 1
+    assert observation.player_index == 0
+    assert observation.round_player_index == 0
+    assert observation.hand_index == 0
+    assert observation.hand_total == 17
+    assert observation.hand_card_values == (8, 7, 2)
+    assert observation.dealer_upcard_value == 10
+    assert observation.power_chip_counts == (2, 1)
+    assert observation.power_chip_counts[observation.player_index] == 2
+    assert observation.action is PowerChipAction.REHIT
+    assert observation.legal_targets == (2,)
+
+
+def test_tournament_asks_bot_to_resolve_pending_rehit_before_normal_action():
+    tournament = make_tournament(
+        player_count=2,
+        power_chip_counts=[2, 0],
+    )
+    bot = HitThenDeclineRehitBot()
+    tournament.bots[0] = bot
+    tournament.start_next_round()
+    tournament.place_round_bets()
+
+    deal_order = [
+        Card(8, "Hearts"),
+        Card(9, "Clubs"),
+        Card(10, "Diamonds"),
+        Card(7, "Spades"),
+        Card(8, "Diamonds"),
+        Card(6, "Clubs"),
+        Card(2, "Hearts"),
+    ]
+    tournament.shoe.cards = list(reversed(deal_order))
+    tournament.begin_player_actions()
+
+    tournament.play_all_players()
+
+    rehit_observations = [
+        observation
+        for observation in bot.power_chip_observations
+        if observation.action is PowerChipAction.REHIT
+    ]
+    assert len(rehit_observations) == 1
+    observation = rehit_observations[0]
+    assert observation.action is PowerChipAction.REHIT
+    assert observation.legal_targets == (2,)
+    assert observation.hand_card_values == (8, 7, 2)
+    assert tournament.players[0].power_chips.remaining() == 2
+    assert tournament.current_table_round.pending_rehit is None
+    assert tournament.current_table_round.get_current_player_index() is None
+
+
+def test_tournament_applies_rehit_target_chosen_by_bot():
+    tournament = make_tournament(
+        player_count=2,
+        power_chip_counts=[1, 0],
+    )
+    bot = HitThenUseRehitBot()
+    tournament.bots[0] = bot
+    tournament.start_next_round()
+    tournament.place_round_bets()
+
+    hit_card = Card(10, "Hearts")
+    replacement_card = Card(5, "Spades")
+    deal_order = [
+        Card(8, "Hearts"),
+        Card(9, "Clubs"),
+        Card(10, "Diamonds"),
+        Card(7, "Spades"),
+        Card(8, "Diamonds"),
+        Card(6, "Clubs"),
+        hit_card,
+        replacement_card,
+    ]
+    tournament.shoe.cards = list(reversed(deal_order))
+    tournament.begin_player_actions()
+
+    tournament.play_all_players()
+
+    rehit_observations = [
+        observation
+        for observation in bot.power_chip_observations
+        if observation.action is PowerChipAction.REHIT
+    ]
+    assert len(rehit_observations) == 1
+    observation = rehit_observations[0]
+    assert observation.hand_card_values == (8, 7, 10)
+    assert observation.legal_targets == (2,)
+    hand_cards = tournament.players[0].get_hand(0).hand.cards
+    assert hand_cards == [deal_order[0], deal_order[3], replacement_card]
+    assert hit_card not in hand_cards
+    assert tournament.players[0].power_chips.remaining() == 0
+    assert tournament.current_table_round.pending_rehit is None
+    assert tournament.current_table_round.get_current_player_index() is None
+
+
+def test_tournament_offers_replace_before_normal_blackjack_action():
+    tournament = make_tournament(
+        player_count=2,
+        power_chip_counts=[1, 0],
+    )
+    bot = ReplaceSecondCardThenStandBot()
+    tournament.bots[0] = bot
+    tournament.start_next_round()
+    tournament.place_round_bets()
+
+    replacement_card = Card(5, "Spades")
+    deal_order = [
+        Card(8, "Hearts"),
+        Card(9, "Clubs"),
+        Card(10, "Diamonds"),
+        Card(7, "Spades"),
+        Card(8, "Diamonds"),
+        Card(6, "Clubs"),
+        replacement_card,
+    ]
+    tournament.shoe.cards = list(reversed(deal_order))
+    tournament.begin_player_actions()
+
+    tournament.play_all_players()
+
+    assert len(bot.power_chip_observations) == 1
+    observation = bot.power_chip_observations[0]
+    assert observation.action is PowerChipAction.REPLACE
+    assert observation.legal_targets == (0, 1)
+    assert observation.hand_card_values == (8, 7)
+    assert tournament.players[0].get_hand(0).hand.cards == [
+        deal_order[0],
+        replacement_card,
+    ]
+    assert tournament.players[0].power_chips.remaining() == 0
+    assert tournament.current_table_round.get_current_player_index() is None
+
+
+def test_tournament_applies_neural_power_chip_choice_and_consumes_chip():
+    tournament = make_tournament(
+        player_count=2,
+        power_chip_counts=[1, 0],
+    )
+    neural_bot = NeuralPowerChipThenStandAgent(
+        ForcedSecondTargetPowerChipNetwork()
+    )
+    tournament.start_next_round()
+    tournament.place_round_bets()
+    tournament.bots[0] = neural_bot
+
+    original_second_card = Card(7, "Spades")
+    replacement_card = Card(10, "Hearts")
+    deal_order = [
+        Card(8, "Hearts"),
+        Card(9, "Clubs"),
+        Card(10, "Diamonds"),
+        original_second_card,
+        Card(8, "Diamonds"),
+        Card(6, "Clubs"),
+        replacement_card,
+    ]
+    tournament.shoe.cards = list(reversed(deal_order))
+    tournament.begin_player_actions()
+
+    tournament.play_all_players()
+
+    hand_cards = tournament.players[0].get_hand(0).hand.cards
+    assert hand_cards == [deal_order[0], replacement_card]
+    assert original_second_card not in hand_cards
+    assert tournament.players[0].power_chips.remaining() == 0
 
 
 def test_active_player_indices():

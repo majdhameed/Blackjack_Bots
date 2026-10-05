@@ -5,6 +5,8 @@ import numpy as np
 
 from ml.betting_encoder import BETTING_FEATURE_COUNT
 
+from ml.power_chip_encoder import POWER_CHIP_FEATURE_COUNT
+
 
 LEGACY_BETTING_ACTION_NAMES = (
     "legacy_fraction",
@@ -93,6 +95,8 @@ LEGACY_ACTION_RENAMES = {
     "protect_lead": "minimum",
 }
 
+
+
 for old_percentage in range(5, 101, 5):
     old_name = f"bet_{old_percentage:02d}_percent"
     closest_percentage = min(
@@ -106,6 +110,13 @@ for old_percentage in range(5, 101, 5):
         f"bet_{closest_percentage:02d}_percent"
     )
 
+POWER_CHIP_CHOICE_COUNT = 3
+
+power_chip_choices = {
+    0: "Nothing",
+    1: "first",
+    2: "second",
+}
 
 class BettingNetwork:
     def __init__(self, seed=None):
@@ -166,6 +177,26 @@ class BettingNetwork:
         )
         self.action_biases[0] = -1_000_000.0
 
+        self.power_chip_hidden_weights = (
+            self.random_generator.normal(
+                loc=0.0,
+                scale=0.1,
+                size= (16, 15),
+            )
+        )
+
+        self.power_chip_hidden_biases = np.zeros(16)
+
+        self.power_chip_output_weights = (
+            self.random_generator.normal(
+                loc=0.0,
+                scale=0.1,
+                size=(POWER_CHIP_CHOICE_COUNT, 16),
+            )
+        )
+
+        self.power_chip_output_biases = np.zeros(POWER_CHIP_CHOICE_COUNT)
+
     def _hidden_values(self, features):
         if len(features) != BETTING_FEATURE_COUNT:
             raise ValueError(
@@ -206,6 +237,29 @@ class BettingNetwork:
         )
         return np.asarray(scores, dtype=float)
 
+    def power_chip_scores(self, features):
+        if len(features) != POWER_CHIP_FEATURE_COUNT:
+            raise ValueError(
+                "features must have a length of "
+                f"{POWER_CHIP_FEATURE_COUNT}"
+            )
+
+        for feature in features:
+            if not np.isfinite(feature):
+                raise ValueError(
+                    "features must contain finite numbers"
+                )
+
+        hidden_values = self.power_chip_hidden_weights @ np.asarray(features, dtype=float) + self.power_chip_hidden_biases
+        hidden_values = np.maximum(0, hidden_values)
+
+        scores = self.power_chip_output_weights @ hidden_values + self.power_chip_output_biases
+        return np.asarray(scores, dtype=float)
+
+    def preferred_power_chip_action(self, features):
+        scores = self.power_chip_scores(features)
+        return int(np.argmax(scores))
+ 
     def preferred_action(self, features):
         scores = self.action_scores(features)
         return int(np.argmax(scores))
@@ -249,7 +303,18 @@ class BettingNetwork:
         cloned_net.action_biases = np.copy(
             self.action_biases
         )
-        
+        cloned_net.power_chip_hidden_weights = np.copy(
+            self.power_chip_hidden_weights
+        )
+        cloned_net.power_chip_hidden_biases = np.copy(
+            self.power_chip_hidden_biases
+        )
+        cloned_net.power_chip_output_weights = np.copy(
+            self.power_chip_output_weights
+        )
+        cloned_net.power_chip_output_biases = np.copy(
+            self.power_chip_output_biases
+        )
         cloned_net.random_generator = np.random.default_rng()
         cloned_net.random_generator.bit_generator.state = self.random_generator.bit_generator.state
         
@@ -272,6 +337,10 @@ class BettingNetwork:
             "biases3",
             "action_weights",
             "action_biases",
+            "power_chip_hidden_weights",
+            "power_chip_hidden_biases",
+            "power_chip_output_weights",
+            "power_chip_output_biases",
         )
 
         for parameter_name in parameter_names:
@@ -309,6 +378,10 @@ class BettingNetwork:
             "biases3": self.biases3.copy(),
             "action_weights": self.action_weights.copy(),
             "action_biases": self.action_biases.copy(),
+            "power_chip_hidden_weights": self.power_chip_hidden_weights.copy(),
+            "power_chip_hidden_biases": self.power_chip_hidden_biases.copy(),
+            "power_chip_output_weights": self.power_chip_output_weights.copy(),
+            "power_chip_output_biases": self.power_chip_output_biases.copy(),
         }
     
     def save(self, file_path):
@@ -354,11 +427,20 @@ class BettingNetwork:
                 16,
             ),
             "action_biases": (BETTING_ACTION_COUNT,),
+
+            "power_chip_hidden_weights": (16, POWER_CHIP_FEATURE_COUNT),
+            "power_chip_hidden_biases": (16,),
+            "power_chip_output_weights": (3, 16),
+            "power_chip_output_biases": (3,),
         }
 
         legacy_optional_parameters = {
             "action_weights",
             "action_biases",
+            "power_chip_hidden_weights",
+            "power_chip_hidden_biases",
+            "power_chip_output_weights",
+            "power_chip_output_biases",
         }
 
         with np.load(
@@ -470,6 +552,11 @@ class BettingNetwork:
 
         network = cls()
 
+        if "power_chip_hidden_weights" not in loaded_parameters:
+           network.power_chip_output_weights.fill(0.0)
+           network.power_chip_output_biases.fill(-0.05)
+           network.power_chip_output_biases[0] = 0.05
+
         # Old one-output checkpoints keep their exact original behavior by
         # selecting the legacy fraction action until evolution changes it.
         if "action_weights" not in loaded_parameters:
@@ -512,6 +599,20 @@ class BettingNetwork:
             ]
             network.action_biases = loaded_parameters[
                 "action_biases"
+            ]
+
+        if "power_chip_hidden_weights" in loaded_parameters:
+            network.power_chip_hidden_weights = loaded_parameters[
+                "power_chip_hidden_weights"
+            ]
+            network.power_chip_hidden_biases = loaded_parameters[
+                "power_chip_hidden_biases"
+            ]
+            network.power_chip_output_weights = loaded_parameters[
+                "power_chip_output_weights"
+            ]
+            network.power_chip_output_biases = loaded_parameters[
+                "power_chip_output_biases"
             ]
 
         return network

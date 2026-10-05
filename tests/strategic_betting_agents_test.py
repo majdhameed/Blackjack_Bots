@@ -354,7 +354,10 @@ def test_unpredictable_agent_changes_bet_sizes():
     assert max(bets) <= observation.bankroll
 
 
-def make_trainer(randomize_training_rounds=True):
+def make_trainer(
+    randomize_training_rounds=True,
+    power_chip_count=0,
+):
     population = Population(
         population_size=14,
         elite_count=2,
@@ -374,7 +377,37 @@ def make_trainer(randomize_training_rounds=True):
         randomize_training_rounds=(
             randomize_training_rounds
         ),
+        power_chip_count=power_chip_count,
     )
+
+
+def test_training_scenarios_give_each_player_configured_power_chips():
+    trainer = make_trainer(power_chip_count=2)
+
+    players, _, _ = trainer.create_tournament_scenario(
+        player_count=7,
+        stage="normal",
+    )
+
+    assert [
+        player.power_chips.remaining()
+        for player in players
+    ] == [2] * 7
+
+
+@pytest.mark.parametrize("stage", ("mid", "late", "extreme"))
+def test_skewed_training_scenarios_keep_configured_power_chips(stage):
+    trainer = make_trainer(power_chip_count=2)
+
+    players, _, _ = trainer.create_tournament_scenario(
+        player_count=7,
+        stage=stage,
+    )
+
+    assert [
+        player.power_chips.remaining()
+        for player in players
+    ] == [2] * 7
 
 
 def test_population_starts_with_varied_betting_biases():
@@ -430,6 +463,111 @@ def test_adaptive_table_contains_only_strong_adaptive_opponents():
         "half_bankroll_leader",
         "adaptive_human",
     }
+
+
+def test_adaptive_hard_coded_opponents_receive_power_chip_policies():
+    trainer = make_trainer(power_chip_count=2)
+    competitors = trainer.create_training_baseline_competitors(
+        trainer.population.networks[0],
+        table_kind="adaptive",
+    )
+
+    neural_agent = competitors[0][1]
+    hard_coded_agents = [
+        agent
+        for _, agent in competitors[1:]
+    ]
+
+    assert getattr(neural_agent, "power_chip_policy", None) is None
+    assert len(hard_coded_agents) == 6
+    assert all(
+        callable(
+            getattr(
+                getattr(agent, "power_chip_policy", None),
+                "choose_power_chip",
+                None,
+            )
+        )
+        for agent in hard_coded_agents
+    )
+
+
+def test_minimum_training_opponents_receive_power_chip_policies():
+    trainer = make_trainer(power_chip_count=2)
+    competitors = trainer.create_training_baseline_competitors(
+        trainer.population.networks[0],
+        table_kind="minimum",
+    )
+    hard_coded_agents = [
+        agent
+        for _, agent in competitors[1:]
+    ]
+
+    assert len(hard_coded_agents) == 6
+    assert all(
+        callable(
+            getattr(
+                getattr(agent, "power_chip_policy", None),
+                "choose_power_chip",
+                None,
+            )
+        )
+        for agent in hard_coded_agents
+    )
+
+
+def test_league_fillers_receive_policies_but_neural_champions_do_not():
+    trainer = make_trainer(power_chip_count=2)
+    trainer.champion_league.append(
+        trainer.population.networks[0].clone()
+    )
+    competitors = trainer.create_training_baseline_competitors(
+        trainer.population.networks[1],
+        table_kind="league",
+    )
+
+    assert len(competitors) == 7
+    for name, agent in competitors:
+        policy = getattr(agent, "power_chip_policy", None)
+
+        if name == "neural" or name.startswith("league_champion_"):
+            assert policy is None
+        else:
+            assert callable(
+                getattr(policy, "choose_power_chip", None)
+            )
+
+
+@pytest.mark.parametrize(
+    "lineup_kind",
+    (
+        "adaptive",
+        "disciplined",
+        "human",
+        "randomized_human",
+        "risk_taker",
+        "minimum",
+    ),
+)
+def test_fixed_benchmark_opponents_receive_power_chip_policies(lineup_kind):
+    trainer = make_trainer(power_chip_count=2)
+    competitors = trainer.create_fixed_benchmark_competitors(
+        trainer.population.networks[0],
+        lineup_kind=lineup_kind,
+    )
+
+    assert len(competitors) == 7
+    assert getattr(competitors[0][1], "power_chip_policy", None) is None
+    assert all(
+        callable(
+            getattr(
+                getattr(agent, "power_chip_policy", None),
+                "choose_power_chip",
+                None,
+            )
+        )
+        for _, agent in competitors[1:]
+    )
 
 
 def test_disciplined_benchmark_has_minimum_control():

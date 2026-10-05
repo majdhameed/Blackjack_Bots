@@ -2,6 +2,8 @@
 # use without giving it mutable access to the tournament engine.
 from dataclasses import dataclass
 
+from tournament.power_chips import PowerChipAction
+
 
 # State available while a player is selecting a wager.
 @dataclass(frozen=True)
@@ -67,4 +69,24 @@ class ActionObservation:
     cards_remaining: int
     decks_remaining: float
     shoe_penetration: float
+
+
+@dataclass(frozen=True)
+class PowerChipObservation:
+    round_number: int
+    total_rounds: int
+    rounds_remaining: int
+    player_index: int
+    round_player_index: int
+    hand_index: int
+    bankroll: float
+    bankrolls: tuple
+    current_bet: float
+    hand_total: int
+    hand_is_soft: bool
+    hand_card_values: tuple
+    dealer_upcard_value: int
+    power_chip_counts: tuple
+    action: PowerChipAction
+    legal_targets: tuple
 

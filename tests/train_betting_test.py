@@ -139,11 +139,66 @@ def test_carry_forward_league_copies_loadable_champions(tmp_path):
 
 def test_parse_arguments_accepts_resume_directory_and_generation_count():
     arguments = train_betting.parse_arguments(
-        ["--resume-from", "runs/old", "--generations", "100"]
+        [
+            "--resume-from",
+            "runs/old",
+            "--generations",
+            "100",
+            "--power-chip-count",
+            "2",
+        ]
     )
 
     assert arguments.resume_from == Path("runs/old")
     assert arguments.generations == 100
+    assert arguments.power_chip_count == 2
+
+
+def test_main_passes_power_chip_count_to_trainer(
+    monkeypatch,
+):
+    received_arguments = {}
+    run_directory = Path("unused-test-run")
+
+    class StopAfterTrainerCreation(Exception):
+        pass
+
+    monkeypatch.setattr(
+        train_betting,
+        "create_run_artifact_paths",
+        lambda: {
+            "run_directory": run_directory,
+            "model_path": run_directory / "model.npz",
+            "metrics_path": run_directory / "metrics.csv",
+        },
+    )
+    monkeypatch.setattr(
+        train_betting,
+        "create_population",
+        lambda **kwargs: object(),
+    )
+
+    def fake_create_trainer(**kwargs):
+        received_arguments.update(kwargs)
+        raise StopAfterTrainerCreation
+
+    monkeypatch.setattr(
+        train_betting,
+        "create_trainer",
+        fake_create_trainer,
+    )
+
+    with pytest.raises(StopAfterTrainerCreation):
+        train_betting.main(
+            [
+                "--generations",
+                "1",
+                "--power-chip-count",
+                "2",
+            ]
+        )
+
+    assert received_arguments["power_chip_count"] == 2
 
 
 # --------------------------------------------------
@@ -168,6 +223,7 @@ def test_create_trainer():
         minimum_bet=100,
         hit_soft_17=True,
         max_hands=4,
+        power_chip_count=2,
     )
 
     assert isinstance(trainer, Trainer)
@@ -178,6 +234,7 @@ def test_create_trainer():
     assert trainer.minimum_bet == 100
     assert trainer.hit_soft_17 is True
     assert trainer.max_hands == 4
+    assert trainer.power_chip_count == 2
 
 
 # --------------------------------------------------

@@ -10,7 +10,7 @@ The project currently covers three related use cases:
 - Simulate a basic-strategy player over many rounds.
 - Run tournaments in which several bots use the same card-play strategy but different betting systems.
 
-The engine handles normal blackjack actions and round settlement, including hits, stands, doubles, splits, surrender, dealer blackjack, natural blackjack, pushes, configurable soft-17 behavior, multiple decks, and a maximum number of split hands.
+The engine handles normal blackjack actions and round settlement, including hits, stands, doubles, splits, surrender, dealer blackjack, natural blackjack, pushes, configurable soft-17 behavior, multiple decks, a maximum number of split hands, and optional power chips.
 
 This project is intended for simulation and software experimentation. It is not gambling advice, and past simulated performance does not predict real-world results.
 
@@ -31,6 +31,12 @@ The tournament simulator currently compares seven strategies:
 Every included bot inherits the same basic-strategy card decisions. This isolates bet sizing as the main difference between competitors.
 
 All non-all-in wagers use table-minimum chip increments. With a `$100` minimum, legal strategy outputs are `$100`, `$200`, `$300`, and so on; a short remaining bankroll may still be wagered all-in.
+
+## Power chips
+
+Each player may start with a shared inventory of optional power chips. A chip can replace either opening card after the dealer-blackjack check (`REPLACE`), or replace the most recent hit card before play continues (`REHIT`). On split hands, only the newly dealt card can be replaced. Every replacement draws the next card from the shoe and consumes one chip.
+
+Bots receive an immutable `PowerChipObservation` and may return a legal card index or `None`. The included policies can save busting hits, improve stiff hands against strong dealer cards, combine tactical rules, and reserve chips for large wagers or late rounds. Agents decline power chips by default unless a policy is attached with `set_power_chip_policy(...)`.
 
 The neural-betting trainer also uses state-aware and deliberately unpredictable opponents:
 
@@ -118,6 +124,8 @@ This script is the older single-player simulation path. Its agent calls still ne
 ```powershell
 python train_betting.py
 ```
+
+Use `--power-chip-count N` to give every training-table player `N` chips. The default is zero, preserving the standard blackjack training setup.
 
 The current overnight configuration uses 200 generations, 30 self-play tournaments per network, 30 mixed-opponent tournaments per network, 300 staged benchmark tournaments, and the top 10 benchmark candidates. Runtime depends on the machine; independently verified new best networks are checkpointed throughout the run.
 
